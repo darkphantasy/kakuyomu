@@ -35,23 +35,40 @@ GitHub に履歴が積み上がる(いつでも過去の版に戻れる)
 
 GAS を使っている Google アカウントで https://script.google.com/home/usersettings を開き、「Google Apps Script API」を **オン** にする。
 
-### 2. 手元のPCで clasp にログイン
+### 2. clasp にログインして認証情報を取得
+
+**方法A: ブラウザだけで完結(Google Cloud Shell、おすすめ)**
+
+PCへのインストールは不要です。
+
+1. GAS と同じ Google アカウントで https://shell.cloud.google.com を開く(初回は利用規約に同意)
+2. 画面下のターミナルで次を実行:
+
+   ```bash
+   npm install -g @google/clasp@2.4.2
+   clasp login --no-localhost
+   ```
+
+3. 表示された URL を新しいタブで開き、Google アカウントで認証を許可すると認証コードが表示されるので、コピーしてターミナルに貼り付けて Enter
+4. 認証情報を表示してコピー:
+
+   ```bash
+   cat ~/.clasprc.json
+   ```
+
+**方法B: 手元のPCで実行**
 
 Node.js(v18以上)が入っているPCで:
 
 ```bash
-npm install -g @google/clasp
+npm install -g @google/clasp@2.4.2
 clasp login    # ブラウザが開くので Google アカウントで認証
-```
 
-### 3. 認証情報を GitHub Secrets に登録
-
-ログイン後に生成されるファイルの中身を表示してコピーする:
-
-```bash
 cat ~/.clasprc.json          # macOS / Linux
 type %USERPROFILE%\.clasprc.json   # Windows
 ```
+
+### 3. 認証情報を GitHub Secrets に登録
 
 GitHub リポジトリの **Settings → Secrets and variables → Actions → New repository secret** で、名前を `CLASPRC_JSON`、値に上記の中身を貼り付けて保存。
 
