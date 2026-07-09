@@ -1,0 +1,50 @@
+name: Sync from Google Apps Script
+
+# GAS 側(オンラインエディタ)での編集内容を自動で GitHub に取り込む。
+# 毎日 6:00 JST に実行。Actions タブから手動実行も可能。
+on:
+  schedule:
+    - cron: "0 21 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install clasp
+        run: npm install -g @google/clasp
+
+      # リポジトリの Secrets に登録した認証情報を配置する
+      #   CLASPRC_JSON : ローカルで `clasp login` した後の ~/.clasprc.json の中身
+      - name: Write clasp credentials
+        run: echo "$CLASPRC_JSON" > ~/.clasprc.json
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+
+      - name: Pull from Apps Script
+        run: |
+          (cd kaku_scraping && clasp pull)
+          (cd kaku2 && clasp pull)
+
+      - name: Commit changes if any
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "変更なし"
+          else
+            git commit -m "GAS側の変更を自動取り込み ($(date +%Y-%m-%d))"
+            git push
+          fi

@@ -1,99 +1,91 @@
 # kakuyomu (Google Apps Script)
 
-Google Apps Script (GAS) のコードを [clasp](https://github.com/google/clasp) を使って GitHub でバージョン管理するためのリポジトリです。
+カクヨムの小説を取得して Google ドキュメントに保存する Google Apps Script (GAS) 群を、[clasp](https://github.com/google/clasp) を使って GitHub でバージョン管理するリポジトリです。
 
-## 仕組み
+## 収録プロジェクト
+
+| ディレクトリ | GASプロジェクト | 内容 |
+| --- | --- | --- |
+| [`kaku_scraping/`](kaku_scraping/) | KAKU_SCRAPING | カクヨム小説取得 → Googleドキュメント保存(2026-06 改修版)。続き取得・索引スプレッドシート対応 |
+| [`kaku2/`](kaku2/) | KAKU2 | 同機能の旧改修版 |
+
+各ディレクトリの `.clasp.json` に GAS のスクリプト ID が設定済みで、`src/` 以下が実際のコードです。
+
+## 運用の流れ
+
+普段の編集は今までどおり **GAS のオンラインエディタ**で行えます。バージョン管理は自動で行われます:
 
 ```
-GASエディタ  ⇄  ローカル (src/)  ⇄  GitHub
-        clasp pull/push        git commit/push
+GASオンラインエディタで編集
+        ↓ (毎日 6:00 JST に自動実行)
+GitHub Actions が clasp pull → 変更があれば自動コミット
+        ↓
+GitHub に履歴が積み上がる(いつでも過去の版に戻れる)
 ```
 
-- GAS のコードは `src/` ディレクトリに置きます
-- `clasp push` でローカル → GAS、`clasp pull` で GAS → ローカルに同期します
-- `main` ブランチに push すると GitHub Actions が自動で GAS にデプロイします(設定は後述)
+- 取り込みを今すぐ実行したいときは、GitHub の **Actions タブ →「Sync from Google Apps Script」→ Run workflow**
+- 逆に GitHub 側でコードを直したときは、**Actions タブ → 「Deploy to Google Apps Script」→ Run workflow** で GAS に反映(誤上書き防止のため手動実行のみ)
 
-## 初回セットアップ
+## 初回セットアップ(1回だけ)
 
-### 1. 前提条件
+自動同期を動かすには、GAS にアクセスするための認証情報を GitHub に登録する必要があります。
 
-- [Node.js](https://nodejs.org/)(v18 以上)がインストールされていること
-- GAS を使う Google アカウントで [Apps Script API](https://script.google.com/home/usersettings) を **オン** にしておくこと
+### 1. Apps Script API を有効化
 
-### 2. インストールとログイン
+GAS を使っている Google アカウントで https://script.google.com/home/usersettings を開き、「Google Apps Script API」を **オン** にする。
+
+### 2. 手元のPCで clasp にログイン
+
+Node.js(v18以上)が入っているPCで:
 
 ```bash
-npm install          # clasp をインストール
-npx clasp login      # ブラウザが開くので Google アカウントで認証
+npm install -g @google/clasp
+clasp login    # ブラウザが開くので Google アカウントで認証
 ```
 
-### 3. 既存の GAS プロジェクトと紐づける
+### 3. 認証情報を GitHub Secrets に登録
 
-GAS エディタで「プロジェクトの設定」→「スクリプト ID」をコピーし、`.clasp.json` を作成します:
+ログイン後に生成されるファイルの中身を表示してコピーする:
 
 ```bash
-cp .clasp.json.example .clasp.json
-# .clasp.json を開いて scriptId を書き換える
+cat ~/.clasprc.json          # macOS / Linux
+type %USERPROFILE%\.clasprc.json   # Windows
 ```
 
-既存のコードを取り込む場合:
+GitHub リポジトリの **Settings → Secrets and variables → Actions → New repository secret** で、名前を `CLASPRC_JSON`、値に上記の中身を貼り付けて保存。
+
+> **注意**: `.clasprc.json` は Google アカウントの認証トークンです。Secret 以外の場所(コードやコミット、チャット)には絶対に貼らないでください。トークンが失効して同期が認証エラーで失敗するようになったら、`clasp login` し直して Secret を更新してください。
+
+## ローカルで開発したい場合(任意)
 
 ```bash
-npx clasp pull       # GAS 側のコードを src/ にダウンロード
-git add . && git commit -m "GASから既存コードを取り込み"
+git clone <このリポジトリ>
+cd kakuyomu
+npm install
+npx clasp login
+
+npm run pull            # GAS → ローカル(両プロジェクト)
+npm run push:scraping   # ローカル → GAS (KAKU_SCRAPING)
+npm run push:kaku2      # ローカル → GAS (KAKU2)
+npm run open:scraping   # ブラウザで GAS エディタを開く
 ```
-
-> 新規プロジェクトから始める場合は `npx clasp create --type standalone --rootDir src` でも作成できます(`.clasp.json` が自動生成されます)。
-
-## 日々の開発フロー
-
-```bash
-# 1. ローカルで src/ 以下のコードを編集
-
-# 2. GAS に反映して動作確認
-npm run push         # = clasp push
-
-# 3. 問題なければ git にコミット
-git add .
-git commit -m "変更内容"
-git push
-```
-
-GAS エディタ側で直接編集してしまった場合は `npm run pull` でローカルに取り込んでからコミットしてください。
-
-### 便利コマンド
-
-| コマンド | 内容 |
-| --- | --- |
-| `npm run push` | ローカルのコードを GAS に反映 |
-| `npm run pull` | GAS のコードをローカルに取得 |
-| `npm run open` | ブラウザで GAS エディタを開く |
-| `npm run status` | push 対象のファイル一覧を確認 |
-
-## GitHub Actions による自動デプロイ
-
-`main` ブランチの `src/` 配下が更新されると、[.github/workflows/deploy.yml](.github/workflows/deploy.yml) が自動で `clasp push` を実行します。
-
-有効にするには、リポジトリの **Settings → Secrets and variables → Actions** で以下の 2 つの Secret を登録してください:
-
-| Secret 名 | 値 |
-| --- | --- |
-| `CLASPRC_JSON` | ローカルで `clasp login` した後に生成される `~/.clasprc.json` の中身(macOS/Linux は `cat ~/.clasprc.json`、Windows は `type %USERPROFILE%\.clasprc.json` で表示) |
-| `SCRIPT_ID` | GAS のスクリプト ID |
-
-> **注意**: `.clasprc.json` は Google アカウントの認証トークンです。Secret 以外の場所(コードやコミット)には絶対に含めないでください。`.gitignore` で `.clasprc.json` と `.clasp.json` は除外済みです。
->
-> トークンは一定期間で失効することがあります。Actions のデプロイが認証エラーで失敗するようになったら、ローカルで `clasp login` し直して Secret を更新してください。
 
 ## ディレクトリ構成
 
 ```
 .
-├── src/                  # GAS のコード(ここだけが GAS に同期される)
-│   ├── appsscript.json   # GAS のマニフェスト(タイムゾーン・権限など)
-│   └── main.js           # スクリプト本体(.js は GAS 側で .gs になる)
-├── .clasp.json           # スクリプトIDの設定(各自作成・コミットしない)
-├── .clasp.json.example   # ↑のテンプレート
-├── .claspignore          # clasp push の対象外設定
-└── .github/workflows/    # 自動デプロイ設定
+├── kaku_scraping/
+│   ├── .clasp.json           # スクリプトID設定
+│   └── src/
+│       ├── appsscript.json   # GASマニフェスト
+│       ├── Kakuyomu_to_docs.js
+│       └── Reformat_existing_docs.js
+├── kaku2/
+│   ├── .clasp.json
+│   └── src/
+│       ├── appsscript.json
+│       └── コード.js
+└── .github/workflows/
+    ├── sync-from-gas.yml     # GAS → GitHub 自動同期(毎日)
+    └── deploy.yml            # GitHub → GAS 反映(手動)
 ```

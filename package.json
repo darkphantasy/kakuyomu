@@ -2,13 +2,15 @@
   "name": "kakuyomu",
   "version": "1.0.0",
   "private": true,
-  "description": "Google Apps Script project managed with clasp",
+  "description": "カクヨム関連の Google Apps Script を clasp で管理",
   "scripts": {
-    "push": "clasp push",
-    "pull": "clasp pull",
-    "open": "clasp open",
-    "deploy": "clasp push && clasp deploy",
-    "status": "clasp status"
+    "pull": "npm run pull:scraping && npm run pull:kaku2",
+    "pull:scraping": "cd kaku_scraping && clasp pull",
+    "pull:kaku2": "cd kaku2 && clasp pull",
+    "push:scraping": "cd kaku_scraping && clasp push",
+    "push:kaku2": "cd kaku2 && clasp push",
+    "open:scraping": "cd kaku_scraping && clasp open",
+    "open:kaku2": "cd kaku2 && clasp open"
   },
   "devDependencies": {
     "@google/clasp": "^2.4.2"

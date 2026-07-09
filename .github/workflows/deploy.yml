@@ -1,12 +1,21 @@
 name: Deploy to Google Apps Script
 
-# main ブランチに push されたら自動で GAS に反映する
+# リポジトリのコードを GAS 側に反映する(手動実行のみ)。
+# 普段の編集を GAS のオンラインエディタで行っている場合、
+# 自動デプロイは編集内容を上書きする恐れがあるため、
+# GitHub 側でコードを修正したときだけ Actions タブから手動で実行する。
 on:
-  push:
-    branches: [main]
-    paths:
-      - "src/**"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      project:
+        description: "デプロイするプロジェクト"
+        required: true
+        default: "both"
+        type: choice
+        options:
+          - both
+          - kaku_scraping
+          - kaku2
 
 jobs:
   deploy:
@@ -23,22 +32,16 @@ jobs:
       - name: Install clasp
         run: npm install -g @google/clasp
 
-      # リポジトリの Secrets に登録した認証情報を配置する
-      #   CLASPRC_JSON : ローカルで `clasp login` した後の ~/.clasprc.json の中身
-      #   SCRIPT_ID    : GAS のスクリプトID
       - name: Write clasp credentials
         run: echo "$CLASPRC_JSON" > ~/.clasprc.json
         env:
           CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
 
-      - name: Write .clasp.json
-        run: |
-          cat > .clasp.json <<EOF
-          {
-            "scriptId": "${{ secrets.SCRIPT_ID }}",
-            "rootDir": "src"
-          }
-          EOF
-
       - name: Push to Apps Script
-        run: clasp push -f
+        run: |
+          if [ "${{ inputs.project }}" = "both" ] || [ "${{ inputs.project }}" = "kaku_scraping" ]; then
+            (cd kaku_scraping && clasp push -f)
+          fi
+          if [ "${{ inputs.project }}" = "both" ] || [ "${{ inputs.project }}" = "kaku2" ]; then
+            (cd kaku2 && clasp push -f)
+          fi
