@@ -1,0 +1,11 @@
+# 依存パッケージ
+node_modules/
+
+# clasp の認証情報・個人設定(絶対にコミットしない)
+.clasprc.json
+.clasp.json
+
+# エディタ・OS
+.vscode/
+.idea/
+.DS_Store

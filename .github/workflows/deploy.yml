@@ -1,0 +1,44 @@
+name: Deploy to Google Apps Script
+
+# main ブランチに push されたら自動で GAS に反映する
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install clasp
+        run: npm install -g @google/clasp
+
+      # リポジトリの Secrets に登録した認証情報を配置する
+      #   CLASPRC_JSON : ローカルで `clasp login` した後の ~/.clasprc.json の中身
+      #   SCRIPT_ID    : GAS のスクリプトID
+      - name: Write clasp credentials
+        run: echo "$CLASPRC_JSON" > ~/.clasprc.json
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+
+      - name: Write .clasp.json
+        run: |
+          cat > .clasp.json <<EOF
+          {
+            "scriptId": "${{ secrets.SCRIPT_ID }}",
+            "rootDir": "src"
+          }
+          EOF
+
+      - name: Push to Apps Script
+        run: clasp push -f

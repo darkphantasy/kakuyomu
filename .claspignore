@@ -1,0 +1,7 @@
+# clasp push の対象外にするファイル
+# rootDir (src/) 基準で評価される
+**/**
+!appsscript.json
+!*.js
+!*.gs
+!*.html
