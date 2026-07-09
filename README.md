@@ -1,15 +1,16 @@
 # kakuyomu (Google Apps Script)
 
-カクヨムの小説を取得して Google ドキュメントに保存する Google Apps Script (GAS) 群を、[clasp](https://github.com/google/clasp) を使って GitHub でバージョン管理するリポジトリです。
+カクヨムの小説を取得して Google ドキュメントに保存する Google Apps Script (GAS) を、[clasp](https://github.com/google/clasp) を使って GitHub でバージョン管理するリポジトリです。
 
 ## 収録プロジェクト
 
 | ディレクトリ | GASプロジェクト | 内容 |
 | --- | --- | --- |
 | [`kaku_scraping/`](kaku_scraping/) | KAKU_SCRAPING | カクヨム小説取得 → Googleドキュメント保存(2026-06 改修版)。続き取得・索引スプレッドシート対応 |
-| [`kaku2/`](kaku2/) | KAKU2 | 同機能の旧改修版 |
 
-各ディレクトリの `.clasp.json` に GAS のスクリプト ID が設定済みで、`src/` 以下が実際のコードです。
+`kaku_scraping/.clasp.json` に GAS のスクリプト ID が設定済みで、`src/` 以下が実際のコードです。
+
+> 旧版の KAKU2 は取り込み後に削除しました。必要であれば Git 履歴(コミット `464525f`)から参照できます。
 
 ## 運用の流れ
 
@@ -64,10 +65,9 @@ cd kakuyomu
 npm install
 npx clasp login
 
-npm run pull            # GAS → ローカル(両プロジェクト)
-npm run push:scraping   # ローカル → GAS (KAKU_SCRAPING)
-npm run push:kaku2      # ローカル → GAS (KAKU2)
-npm run open:scraping   # ブラウザで GAS エディタを開く
+npm run pull     # GAS → ローカル
+npm run push     # ローカル → GAS
+npm run open     # ブラウザで GAS エディタを開く
 ```
 
 ## ディレクトリ構成
@@ -80,11 +80,6 @@ npm run open:scraping   # ブラウザで GAS エディタを開く
 │       ├── appsscript.json   # GASマニフェスト
 │       ├── Kakuyomu_to_docs.js
 │       └── Reformat_existing_docs.js
-├── kaku2/
-│   ├── .clasp.json
-│   └── src/
-│       ├── appsscript.json
-│       └── コード.js
 └── .github/workflows/
     ├── sync-from-gas.yml     # GAS → GitHub 自動同期(毎日)
     └── deploy.yml            # GitHub → GAS 反映(手動)

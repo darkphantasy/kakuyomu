@@ -4,13 +4,10 @@
   "private": true,
   "description": "カクヨム関連の Google Apps Script を clasp で管理",
   "scripts": {
-    "pull": "npm run pull:scraping && npm run pull:kaku2",
-    "pull:scraping": "cd kaku_scraping && clasp pull",
-    "pull:kaku2": "cd kaku2 && clasp pull",
-    "push:scraping": "cd kaku_scraping && clasp push",
-    "push:kaku2": "cd kaku2 && clasp push",
-    "open:scraping": "cd kaku_scraping && clasp open",
-    "open:kaku2": "cd kaku2 && clasp open"
+    "pull": "cd kaku_scraping && clasp pull",
+    "push": "cd kaku_scraping && clasp push",
+    "open": "cd kaku_scraping && clasp open",
+    "status": "cd kaku_scraping && clasp status"
   },
   "devDependencies": {
     "@google/clasp": "^2.4.2"

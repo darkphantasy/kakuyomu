@@ -33,9 +33,7 @@ jobs:
           CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
 
       - name: Pull from Apps Script
-        run: |
-          (cd kaku_scraping && clasp pull)
-          (cd kaku2 && clasp pull)
+        run: (cd kaku_scraping && clasp pull)
 
       - name: Commit changes if any
         run: |

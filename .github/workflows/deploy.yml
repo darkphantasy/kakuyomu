@@ -5,17 +5,7 @@ name: Deploy to Google Apps Script
 # 自動デプロイは編集内容を上書きする恐れがあるため、
 # GitHub 側でコードを修正したときだけ Actions タブから手動で実行する。
 on:
-  workflow_dispatch:
-    inputs:
-      project:
-        description: "デプロイするプロジェクト"
-        required: true
-        default: "both"
-        type: choice
-        options:
-          - both
-          - kaku_scraping
-          - kaku2
+  workflow_dispatch: {}
 
 jobs:
   deploy:
@@ -38,10 +28,4 @@ jobs:
           CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
 
       - name: Push to Apps Script
-        run: |
-          if [ "${{ inputs.project }}" = "both" ] || [ "${{ inputs.project }}" = "kaku_scraping" ]; then
-            (cd kaku_scraping && clasp push -f)
-          fi
-          if [ "${{ inputs.project }}" = "both" ] || [ "${{ inputs.project }}" = "kaku2" ]; then
-            (cd kaku2 && clasp push -f)
-          fi
+        run: (cd kaku_scraping && clasp push -f)
