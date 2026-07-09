@@ -94,6 +94,21 @@ npm run push     # ローカル → GAS
 npm run open     # ブラウザで GAS エディタを開く
 ```
 
+## Claude Code でコードを修正する場合
+
+このプロジェクトの設計判断・制約(OOM を避ける読み出し方法、cursor の扱い、書式仕様など)は [`CLAUDE.md`](CLAUDE.md) にまとめてあります。Claude Code はこのファイルを自動で読み込むため、修正を依頼する際に毎回説明し直す必要はありません。
+
+開発ループ:
+
+1. Claude Code に修正を依頼する
+2. 編集後、構文チェックを実行(`node --check kaku_scraping/src/Kakuyomu_to_docs.js`)
+3. ブランチに commit・push → PR を作成 → 差分を確認して `main` にマージ
+4. マージ後、GitHub の **Actions タブ → 「Deploy to Google Apps Script」→ Run workflow** で GAS に反映
+5. GAS エディタで対象関数(`startFetch` 等)を実行し、実行ログを確認
+6. 問題があればログを Claude Code に貼って次の修正へ
+
+GAS エディタ側で直接編集した内容は `sync-from-gas.yml` が毎日自動で `main` に取り込むため、Claude Code で作業を始める前に `git pull` して最新化しておくこと。
+
 ## ディレクトリ構成
 
 ```
