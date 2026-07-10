@@ -92,11 +92,23 @@ PCへのインストールは不要です。
    curl "http://localhost:数字/?code=...(コピーしたURL全体)"
    ```
 
-6. 元のターミナルタブに戻るとログインが完了しているので、認証情報を表示してコピー:
+6. 元のターミナルタブに戻り、ログイン完了のメッセージ(`Authorization successful.` 等)が出ていることを確認する
+7. 認証情報の中身を確認する:
 
    ```bash
    cat ~/.clasprc.json
    ```
+
+   出力に `"access_token"` という文字列が実際に含まれているか目で確認する(空・不完全なファイルのまま Secret に登録すると、同期が `Cannot read properties of undefined (reading 'access_token')` エラーで失敗する)
+8. 念のため、その場で動作確認する:
+
+   ```bash
+   cd /tmp && git clone --depth 1 https://github.com/darkphantasy/kakuyomu.git test-clasp
+   cd test-clasp/kaku_scraping && clasp pull
+   ```
+
+   ファイルが正常に取得できれば OK。確認後 `test-clasp` フォルダは削除して構わない
+9. 問題なければ `cat ~/.clasprc.json` の中身をコピーする
 
 **方法B: 手元のPCで実行**
 
@@ -115,6 +127,8 @@ type %USERPROFILE%\.clasprc.json   # Windows
 GitHub リポジトリの **Settings → Secrets and variables → Actions → New repository secret** で、名前を `CLASPRC_JSON`、値に上記の中身を貼り付けて保存。
 
 > **注意**: `.clasprc.json` は Google アカウントの認証トークンです。Secret 以外の場所(コードやコミット、チャット)には絶対に貼らないでください。トークンが失効して同期が認証エラーで失敗するようになったら、`clasp login` し直して Secret を更新してください。
+>
+> 同期が `Cannot read properties of undefined (reading 'access_token')` で失敗する場合、Secret に登録した認証情報が不完全です。上記の手順7・8の確認を行ってから Secret を登録し直してください。
 
 ## ローカルで開発したい場合(任意)
 
