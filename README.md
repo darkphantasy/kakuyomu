@@ -80,9 +80,12 @@ PCへのインストールは不要です。
 2. 画面下のターミナルで次を実行:
 
    ```bash
-   npm install -g @google/clasp@2.4.2
+   npm install -g @google/clasp@3.3.0
+   clasp --version
    clasp login
    ```
+
+   `clasp --version` の出力が `3.3.0` になっていることを確認すること。環境によっては別バージョンの clasp が既に入っていて `npm install` の指定が反映されないことがある(実際に一度これが原因で同期が失敗した)。表示されたバージョンが異なる場合は、[3. 認証情報を GitHub Secrets に登録](#3-認証情報を-github-secrets-に登録)の後にある注意書きに従い、ワークフロー側のバージョンもそれに合わせて修正すること。
 
 3. 表示された URL を新しいタブで開き、Google アカウントで認証を許可する
 4. 認証後、「このサイトにアクセスできません(localhost で接続が拒否されました)」というページになるが、**これは想定どおり**。認証コードはこのページの URL に含まれているので、アドレスバーの URL 全体(`http://localhost:数字/?code=...`)をコピーする
@@ -115,8 +118,9 @@ PCへのインストールは不要です。
 Node.js(v18以上)が入っているPCで:
 
 ```bash
-npm install -g @google/clasp@2.4.2
-clasp login    # ブラウザが開くので Google アカウントで認証
+npm install -g @google/clasp@3.3.0
+clasp --version   # 3.3.0 になっていることを確認
+clasp login       # ブラウザが開くので Google アカウントで認証
 
 cat ~/.clasprc.json          # macOS / Linux
 type %USERPROFILE%\.clasprc.json   # Windows
@@ -128,7 +132,9 @@ GitHub リポジトリの **Settings → Secrets and variables → Actions → N
 
 > **注意**: `.clasprc.json` は Google アカウントの認証トークンです。Secret 以外の場所(コードやコミット、チャット)には絶対に貼らないでください。トークンが失効して同期が認証エラーで失敗するようになったら、`clasp login` し直して Secret を更新してください。
 >
-> 同期が `Cannot read properties of undefined (reading 'access_token')` で失敗する場合、Secret に登録した認証情報が不完全です。上記の手順7・8の確認を行ってから Secret を登録し直してください。
+> 同期が `Cannot read properties of undefined (reading 'access_token')` で失敗する場合、考えられる原因は次の2つです。
+> 1. Secret に登録した認証情報が不完全(上記の手順7・8の確認を行ってから Secret を登録し直す)
+> 2. **ログイン時の clasp バージョンと、`.github/workflows/*.yml` の `Install clasp` ステップで入れているバージョンが食い違っている**(`.clasprc.json` の形式はメジャーバージョン間で互換性が無い)。ログイン時に `clasp --version` で確認したバージョンと、ワークフローの `npm install -g @google/clasp@x.x.x` の指定を必ず一致させること。
 
 ## ローカルで開発したい場合(任意)
 

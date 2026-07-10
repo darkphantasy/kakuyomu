@@ -22,9 +22,11 @@ jobs:
         with:
           node-version: 20
 
-      # 認証情報(.clasprc.json)の形式が変わらないようバージョンを固定
+      # ログイン時(Cloud Shell等)と同じバージョンに揃えること。
+      # .clasprc.json の形式はメジャーバージョン間で互換性が無いため、
+      # ここが認証時と食い違うと "Cannot read properties of undefined (reading 'access_token')" で失敗する。
       - name: Install clasp
-        run: npm install -g @google/clasp@2.4.2
+        run: npm install -g @google/clasp@3.3.0
 
       # リポジトリの Secrets に登録した認証情報を配置する
       #   CLASPRC_JSON : ローカルで `clasp login` した後の ~/.clasprc.json の中身
