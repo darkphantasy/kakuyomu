@@ -23,7 +23,7 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 - **ユーザーは読了した内容をドキュメント先頭側から削除して上書き保存する運用**。そのため保存済み cursor は信用できない。追記位置・再開位置は**毎回 `getDocEndCursor` で実ファイルの終端を読み直す**(実装済み。この前提を崩さない)。
 - Apps Script の `replaceText` は RE2 のため `　` 等の `\uXXXX` 表記が使えない("Invalid regular expression pattern")。■ 除去は文字位置ベースで行う。通常の JS 正規表現(`String.replace`)は問題ない。
 - `DriveApp.getFilesByName` / `searchFiles` はドライブ全体検索で遅い。**必ずフォルダ限定**(`findFileInFolder` / `getTargetFolder().searchFiles`)を使う。
-- 保存先は**スクリプトファイル自身の親フォルダ**(`getTargetFolderId()`)。索引・バッファ・成果物すべてここに置く前提。復元系(`rebuildRecordsFromSheet`)もこのフォルダを探す。
+- 保存先は**スクリプトファイル自身の親フォルダ**(`getTargetFolderId()`)。索引・バッファ・成果物すべてここに置く前提。復元系(`rebuildRecordsFromSheet`)もこのフォルダを探す。索引スプレッドシートと操作パネル(後述)もこのフォルダに作成される(=リポジトリには存在しない、Drive上のみの実行時生成物)。
 
 ## アーキテクチャ
 
@@ -33,7 +33,8 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 - **BUILD** (`runBuildPhase`): バッファごとに `parseBufferForBuild` で ■ 除去・空行除去・行頭字下げ正規化(後述)を済ませたクリーンテキストと見出し位置を作り、`insertCleanIntoDoc` が 1 回の `batchUpdate` で挿入＋整形。`MAX_DOC_CHARS=900000` 超過で新規分冊(`HEADER_GUARD_CHARS` でヘッダのみ分冊の無限ループを防止)。最後にフッター(取得記録)を挿入。**再開時は必ず実終端を読み直して cursor 同期**。
 - **続き取得** (`startContinuation` / `prepareContinuation`): `RESUME_<workId>` 記録の `lastEpisodeId` を現目次と照合して差分だけ取得(見つからなければ話数フォールバック)。既存末尾ドキュメントへ追記。追記境界には `\n\n` を先に挿入し前段落との連結を防ぐ。
 - **一括続き取得** (`startContinuationAll`): 全 `RESUME_` 記録をキュー(`BATCH_MODE`/`BATCH_QUEUE`)に積み、1 作品ずつ完走→次へ。新着なしはスキップ。**記録が 1 件も無ければ索引シートから復元**(`rebuildRecordsFromSheet`)してから回す。
-- **索引**: スプレッドシートのみ(Doc 版索引は削除済み)。`updateIndexSpreadsheet` が全記録から再生成。1 作品 1 行、列は「タイトル/話数/ファイル数/最終更新/元URL/ファイル1..N」(N は最大分冊数に合わせ可変、リンクは `=HYPERLINK()`)。ID は `INDEX_SHEET_ID` プロパティに保持。
+- **索引**: スプレッドシートのみ(Doc 版索引は削除済み)。`updateIndexSpreadsheet` が全記録から再生成。1 作品 1 行、列は「タイトル/話数/ファイル数/最終更新/元URL/ファイル1..N」(N は最大分冊数に合わせ可変、リンクは `=HYPERLINK()`)。ID は `INDEX_SHEET_ID` プロパティに保持。シート内のタブ名は `INDEX_SHEET_TAB_NAME`(='索引')固定。索引シートを開く処理は `findOrLocateSpreadsheet_(propKey, fileName)` に共通化(`findIndexSheet_` はこのラッパー)。
+- **操作パネル**: 索引とは別のスプレッドシート(`CONTROL_PANEL_FILE_NAME`、同じ保存先フォルダに作成)。`setupControlPanel` で作成し、そのファイルに installable な onOpen トリガー(`onPanelOpen`)を登録する。パネルを開くとカスタムメニュー「カクヨム操作」が出る。**実行は必ずメニュークリックのみ**(誤操作防止のため onEdit/チェックボックスは使わない)。パラメータはセル(`PANEL_CELL_*`)から読み取り、各 `panelRunXxx` ハンドラが対応する関数(`startFetch`/`startContinuation`/`seedResumeRecord`/`clearResumeRecord`/`syncResumeRecordsFromSheet`/`rebuildIndex`)を呼び、結果をステータスセル(`PANEL_CELL_STATUS`)に書き戻す(`writePanelStatus_`)。多段実行(`startFetch`/`startContinuation`/`startContinuationAll`)は開始時点のメッセージのみ即時反映し、真の完了は `finishRun` の `PHASE_DONE` セット時に `writePanelStatus_` で改めて通知する。パネル未作成時、`writePanelStatus_` は何もしない(呼び出し元を壊さない)。
 
 ## データモデル(Script Properties)
 
@@ -41,6 +42,7 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 - `RESUME_<workId>` … 永続記録 `{title,url,total,lastEpisodeId,docIds,lastCursor,updatedAt}`。`lastCursor` は参考値であり**位置決定には使わない**。
 - `BATCH_MODE` / `BATCH_QUEUE` … 一括続き取得のキュー(RUN_STATE_KEYS 外＝作品完了で消えない)。
 - `INDEX_SHEET_ID` … 索引スプレッドシートの ID。
+- `CONTROL_PANEL_SHEET_ID` … 操作パネルスプレッドシートの ID。
 
 ## 書式仕様(現行)
 
@@ -53,7 +55,9 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 
 ## 実行する関数(ユーザー向けAPI)
 
-`startFetch` / `startContinuation` / `startContinuationAll` / `seedResumeRecord`(続き取得の一覧に追加) / `clearResumeRecord`(続き取得の一覧から削除。記録のみでドキュメントは残る) / `syncResumeRecordsFromSheet`(索引シートの行を正として一覧を差分同期。行追加=追加・行削除=削除、既存作品の記録は変更しない) / `checkResume` / `listResumeRecords` / `rebuildIndex` / `rebuildRecordsFromSheet`(索引シートから記録を全面復元。既存記録も上書きする点が syncResumeRecordsFromSheet と異なる) / `checkProgress` / `resetAll`(記録・索引は残し run 状態のみ消す)。デバッグ用に `START_EPISODE` / `END_EPISODE`(0=無制限)で取得範囲を絞れる(初回取得のみ有効)。
+`startFetch(url?, startEpisode?, endEpisode?)` / `startContinuation(url?)` / `startContinuationAll` / `seedResumeRecord(url?, existingDocIds?)`(続き取得の一覧に追加) / `clearResumeRecord(url?)`(続き取得の一覧から削除。記録のみでドキュメントは残る) / `syncResumeRecordsFromSheet`(索引シートの行を正として一覧を差分同期。行追加=追加・行削除=削除、既存作品の記録は変更しない) / `checkResume(url?)` / `listResumeRecords` / `rebuildIndex` / `rebuildRecordsFromSheet`(索引シートから記録を全面復元。既存記録も上書きする点が syncResumeRecordsFromSheet と異なる) / `checkProgress` / `resetAll`(記録・索引は残し run 状態のみ消す) / `setupControlPanel`(操作パネルの作成・更新。初回のみ実行)。URL引数は省略時 `KAKUYOMU_URL` にフォールバックするので、エディタからの直接実行(引数なし)も従来どおり可能。デバッグ用に `START_EPISODE` / `END_EPISODE`(0=無制限)で取得範囲を絞れる(初回取得のみ有効。`startFetch` の引数でも上書き可)。
+
+操作パネルのメニューハンドラ(`panelRunXxx`、`onPanelOpen`)はパネル経由でのみ呼ばれる内部関数で、ユーザーがエディタから直接実行するものではない。
 
 ## 開発ワークフロー
 

@@ -16,18 +16,21 @@
 //   - 保存先はスクリプトと同じフォルダ。索引スプレッドシートを自動生成・更新
 //
 // ■ 実行する関数
-//   startFetch            … 初回。全話を取得して保存。
-//   startContinuation     … 続き取得（KAKUYOMU_URL の作品）。
+//   startFetch(url?, startEpisode?, endEpisode?) … 初回。全話を取得して保存。
+//                          引数省略時は KAKUYOMU_URL / START_EPISODE / END_EPISODE を使う。
+//   startContinuation(url?) … 続き取得。引数省略時は KAKUYOMU_URL の作品。
 //   startContinuationAll  … 索引の全作品を順に続き取得（一括）。
-//   seedResumeRecord      … 続き取得の一覧に作品を追加（既存作品の現在地を記録。既存ドキュメントIDも登録可）。
-//   clearResumeRecord     … 続き取得の一覧から作品を削除（記録のみ削除。ドキュメント自体は残る）。
+//   seedResumeRecord(url?, existingDocIds?) … 続き取得の一覧に作品を追加（既存作品の現在地を記録。既存ドキュメントIDも登録可）。
+//   clearResumeRecord(url?) … 続き取得の一覧から作品を削除（記録のみ削除。ドキュメント自体は残る）。
 //   syncResumeRecordsFromSheet … 索引スプレッドシートの行を正として一覧を差分同期（行追加＝追加、行削除＝削除）。
-//   checkResume           … 続き取得記録の確認。
+//   checkResume(url?)     … 続き取得記録の確認。
 //   listResumeRecords     … 保存済み全作品の記録を一覧表示。
 //   rebuildIndex          … 索引スプレッドシートを今すぐ再生成。
 //   rebuildRecordsFromSheet … 索引シートから記録を全面復元（スクリプト作り替え後の復旧用。既存記録も上書き）。
 //   checkProgress         … 実行中の進捗確認。
 //   resetAll              … 途中状態のリセット（記録・索引は残す）。
+//   setupControlPanel     … 操作パネル（別スプレッドシート）を作成/更新（初回のみ実行）。
+//                          パラメータをセルに入力し、パネルのメニュー「カクヨム操作」から実行できる。
 //
 // ※ 事前準備：エディタの「サービス」から「Docs API」を追加すること
 //    （userSymbol: Docs / version: v1）。挿入・整形に使用。
@@ -53,7 +56,17 @@ const PHASE_BUILD    = 'BUILD';
 const PHASE_BATCH_NEXT = 'BATCH_NEXT';
 const PHASE_DONE     = 'DONE';
 
-const INDEX_SHEET_NAME = '【索引】カクヨム取得作品（表）';
+const INDEX_SHEET_NAME     = '【索引】カクヨム取得作品（表）';
+const INDEX_SHEET_TAB_NAME = '索引'; // 索引スプレッドシート内のシート（タブ）名
+
+// 操作パネル（索引とは別のスプレッドシート。パラメータ入力＋メニュー実行用）
+const CONTROL_PANEL_FILE_NAME  = '【操作パネル】カクヨム取得コンソール';
+const CONTROL_PANEL_SHEET_NAME = '操作パネル';
+const PANEL_CELL_URL           = 'B4'; // 作品URL
+const PANEL_CELL_START_EPISODE = 'B5'; // 開始話数（初回取得のみ）
+const PANEL_CELL_END_EPISODE   = 'B6'; // 終了話数（初回取得のみ）
+const PANEL_CELL_DOC_IDS       = 'B7'; // 既存ドキュメントID（追加時のみ・カンマ区切り）
+const PANEL_CELL_STATUS        = 'B12'; // 実行結果の書き戻し先
 
 // runの途中経過に使うプロパティキー（完了時にこれだけ消す。記録・索引IDは残す）
 const RUN_STATE_KEYS = [
@@ -142,13 +155,17 @@ function buildFooterLines(props) {
 // ==========================================
 // ① 最初に1回だけ手動実行
 // ==========================================
-function startFetch() {
-  const workId = extractWorkId(KAKUYOMU_URL);
+function startFetch(url, startEpisode, endEpisode) {
+  const targetUrl = url || KAKUYOMU_URL;
+  const startEp   = (startEpisode === undefined || startEpisode === null || startEpisode === '') ? START_EPISODE : Number(startEpisode);
+  const endEp     = (endEpisode   === undefined || endEpisode   === null || endEpisode   === '') ? END_EPISODE   : Number(endEpisode);
+
+  const workId = extractWorkId(targetUrl);
   if (!workId) { Logger.log('作品IDの取得失敗'); return; }
 
   Logger.log(`作品ID: ${workId}`);
 
-  const topHtml = fetchHtml(KAKUYOMU_URL);
+  const topHtml = fetchHtml(targetUrl);
   if (!topHtml) return;
 
   const nextData    = extractNextData(topHtml);
@@ -164,17 +181,17 @@ function startFetch() {
     return;
   }
 
-  const startIndex = Math.max(0, Math.min(START_EPISODE - 1, allEpisodes.length - 1));
-  let   endEx      = (END_EPISODE > 0) ? Math.min(END_EPISODE, allEpisodes.length)
-                                       : allEpisodes.length;
+  const startIndex = Math.max(0, Math.min(startEp - 1, allEpisodes.length - 1));
+  let   endEx      = (endEp > 0) ? Math.min(endEp, allEpisodes.length)
+                                 : allEpisodes.length;
   if (endEx <= startIndex) {
-    Logger.log(`END_EPISODE(${END_EPISODE}) が START_EPISODE(${START_EPISODE}) 以下です。設定を確認してください。`);
+    Logger.log(`END_EPISODE(${endEp}) が START_EPISODE(${startEp}) 以下です。設定を確認してください。`);
     return;
   }
   const episodes = allEpisodes.slice(startIndex, endEx)
     .map((e, j) => ({ ...e, no: startIndex + j + 1 })); // no=作品全体での通し番号(1始まり)
 
-  if (END_EPISODE > 0) {
+  if (endEp > 0) {
     Logger.log(`【デバッグ】${startIndex + 1} 〜 ${endEx} 話のみ取得 (${episodes.length} 件)`);
   } else {
     Logger.log(`取得開始: ${startIndex + 1} 話目〜 (${episodes.length} 件)`);
@@ -185,7 +202,7 @@ function startFetch() {
   props.setProperties({
     WORK_ID:         workId,
     TITLE:           title,
-    SOURCE_URL:      KAKUYOMU_URL,
+    SOURCE_URL:      targetUrl,
     EPISODE_TOTAL:   String(endEx),                   // 取得済みとして記録する到達話数（続き取得の起点）
     LAST_EPISODE_ID: allEpisodes[endEx - 1].id,       // 続き取得の照合用（取得した最後の話）
     EPISODES:        JSON.stringify(episodes),
@@ -201,8 +218,8 @@ function startFetch() {
 // ①' 続き取得モード（記録の次の話から差分取得）
 //   記録が無い場合は seedResumeRecord か startFetch を案内する。
 // ==========================================
-function startContinuation() {
-  if (prepareContinuation(KAKUYOMU_URL)) continuesFetch();
+function startContinuation(url) {
+  if (prepareContinuation(url || KAKUYOMU_URL)) continuesFetch();
 }
 
 // 索引（＝全 RESUME 記録）の全作品を、1作品ずつ順番に続き取得する。
@@ -331,17 +348,18 @@ function prepareContinuation(url) {
 //   再取得せず続き取得を始められるようにするための一度きりの関数。
 //   ※ 既存ドキュメントが現時点より前なら、続きに既読分が混じる可能性あり。
 // ==========================================
-function seedResumeRecord() {
-  const workId = extractWorkId(KAKUYOMU_URL);
-  if (!workId) { Logger.log('作品IDの取得失敗'); return; }
-
-  // 既にある取得済みドキュメントのIDをここに入れると、続き取得時に
-  // そのドキュメント（末尾のもの）へ追記します。空なら続き取得時に新規作成します。
-  const existingDocIds = [
+function seedResumeRecord(url, existingDocIds) {
+  const targetUrl = url || KAKUYOMU_URL;
+  // 既にある取得済みドキュメントのIDを渡すと、続き取得時にそのドキュメント（末尾のもの）
+  // へ追記します。省略時は下の配列（初期値は空＝続き取得時に新規作成）を使う。
+  const docIds = existingDocIds || [
     // '1AbCdEf...既存ドキュメントID...',
   ];
 
-  const topHtml = fetchHtml(KAKUYOMU_URL);
+  const workId = extractWorkId(targetUrl);
+  if (!workId) { Logger.log('作品IDの取得失敗'); return; }
+
+  const topHtml = fetchHtml(targetUrl);
   if (!topHtml) return;
   const nextData    = extractNextData(topHtml);
   const title       = extractTitle(topHtml, nextData, workId);
@@ -350,21 +368,21 @@ function seedResumeRecord() {
 
   // 既存ドキュメントがあれば末尾cursorを先取りして記録（続き取得時の追記起点）
   let lastCursor = 0;
-  if (existingDocIds.length > 0) {
-    try { lastCursor = getDocEndCursor(existingDocIds[existingDocIds.length - 1]); }
+  if (docIds.length > 0) {
+    try { lastCursor = getDocEndCursor(docIds[docIds.length - 1]); }
     catch(e) { Logger.log('末尾cursorの先取りに失敗（続き取得時にバックフィルします）: ' + e); }
   }
 
   saveResumeRecord(workId, {
     title:         title,
-    url:           KAKUYOMU_URL,
+    url:           targetUrl,
     total:         allEpisodes.length,
     lastEpisodeId: allEpisodes[allEpisodes.length - 1].id,
-    docIds:        existingDocIds,
+    docIds:        docIds,
     lastCursor:    lastCursor,
     updatedAt:     Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm'),
   });
-  Logger.log(`現在地を記録しました:「${title}」${allEpisodes.length} 話 / 既存ドキュメント ${existingDocIds.length} 件`);
+  Logger.log(`現在地を記録しました:「${title}」${allEpisodes.length} 話 / 既存ドキュメント ${docIds.length} 件`);
   Logger.log('以降は startContinuation で続きだけ取得できます。');
   try { updateIndexSpreadsheet(); } catch(e) { Logger.log('索引シート更新エラー: ' + e); }
 }
@@ -399,8 +417,8 @@ function updateIndexSpreadsheet() {
     props.setProperty('INDEX_SHEET_ID', ss.getId());
   }
 
-  const sheet = ss.getSheets()[0];
-  sheet.setName('索引');
+  let sheet = ss.getSheetByName(INDEX_SHEET_TAB_NAME);
+  if (!sheet) { sheet = ss.getSheets()[0]; sheet.setName(INDEX_SHEET_TAB_NAME); }
   const oldFilter = sheet.getFilter();
   if (oldFilter) oldFilter.remove();
   sheet.clear();
@@ -476,11 +494,12 @@ function extractHyperlinkUrl(formula) {
   return m ? m[1] : '';
 }
 
-// 索引スプレッドシートを開く（INDEX_SHEET_ID → 無ければフォルダ内を名前で検索）。見つからなければ null。
-function findIndexSheet_() {
+// フォルダ内のスプレッドシートを開く（Scriptプロパティの ID → 無ければフォルダ内を名前で検索）。
+//   見つからなければ null。見つかった場合はプロパティに ID を書き戻す。
+function findOrLocateSpreadsheet_(propKey, fileName) {
   const props = PropertiesService.getScriptProperties();
   let ss = null;
-  const ssId = props.getProperty('INDEX_SHEET_ID');
+  const ssId = props.getProperty(propKey);
   if (ssId) {
     try { if (!DriveApp.getFileById(ssId).isTrashed()) ss = SpreadsheetApp.openById(ssId); }
     catch(e) { ss = null; }
@@ -488,15 +507,23 @@ function findIndexSheet_() {
   if (!ss) {
     try {
       const folder = DriveApp.getFolderById(getTargetFolderId());
-      const it = folder.getFilesByName(INDEX_SHEET_NAME);
+      const it = folder.getFilesByName(fileName);
       if (it.hasNext()) {
         const f = it.next();
         ss = SpreadsheetApp.openById(f.getId());
-        props.setProperty('INDEX_SHEET_ID', f.getId());
+        props.setProperty(propKey, f.getId());
       }
-    } catch(e) { Logger.log('索引シート検索エラー: ' + e); }
+    } catch(e) { Logger.log(`${fileName} 検索エラー: ` + e); }
   }
   return ss;
+}
+
+function findIndexSheet_() {
+  return findOrLocateSpreadsheet_('INDEX_SHEET_ID', INDEX_SHEET_NAME);
+}
+
+function findControlPanelSheet_() {
+  return findOrLocateSpreadsheet_('CONTROL_PANEL_SHEET_ID', CONTROL_PANEL_FILE_NAME);
 }
 
 // 索引シートの1行をパースする（列: 0:タイトル 1:話数 2:ファイル数 3:最終更新 4:元URL 5..:ファイル）。
@@ -536,7 +563,7 @@ function rebuildRecordsFromSheet() {
   const ss = findIndexSheet_();
   if (!ss) { Logger.log('索引シートが見つかりません。'); return 0; }
 
-  const sheet    = ss.getSheets()[0];
+  const sheet    = ss.getSheetByName(INDEX_SHEET_TAB_NAME) || ss.getSheets()[0];
   const range    = sheet.getDataRange();
   const values   = range.getValues();
   const formulas = range.getFormulas();
@@ -581,7 +608,7 @@ function syncResumeRecordsFromSheet() {
   const ss = findIndexSheet_();
   if (!ss) { Logger.log('索引シートが見つかりません。'); return; }
 
-  const sheet    = ss.getSheets()[0];
+  const sheet    = ss.getSheetByName(INDEX_SHEET_TAB_NAME) || ss.getSheets()[0];
   const range    = sheet.getDataRange();
   const values   = range.getValues();
   const formulas = range.getFormulas();
@@ -646,9 +673,10 @@ function syncResumeRecordsFromSheet() {
   }
 }
 
-// 続き取得記録の確認（KAKUYOMU_URL の作品）
-function checkResume() {
-  const workId = extractWorkId(KAKUYOMU_URL);
+// 続き取得記録の確認（引数省略時は KAKUYOMU_URL の作品）
+function checkResume(url) {
+  const targetUrl = url || KAKUYOMU_URL;
+  const workId = extractWorkId(targetUrl);
   if (!workId) { Logger.log('作品IDの取得失敗'); return; }
   const rec = getResumeRecord(workId);
   if (!rec) { Logger.log('この作品の続き取得記録はありません。'); return; }
@@ -669,13 +697,14 @@ function listResumeRecords() {
 }
 
 // ==========================================
-// 続き取得の一覧から作品を外す（KAKUYOMU_URL の作品）
+// 続き取得の一覧から作品を外す（引数省略時は KAKUYOMU_URL の作品）
 //   記録（RESUME_<workId>）を削除するだけで、取得済みの Google ドキュメント自体は削除しない。
 //   索引スプレッドシートもあわせて更新するので、実行後は一覧から消えて見える。
 //   ※ 再度追加したい場合は seedResumeRecord を実行する。
 // ==========================================
-function clearResumeRecord() {
-  const workId = extractWorkId(KAKUYOMU_URL);
+function clearResumeRecord(url) {
+  const targetUrl = url || KAKUYOMU_URL;
+  const workId = extractWorkId(targetUrl);
   if (!workId) { Logger.log('作品IDの取得失敗'); return; }
 
   const rec = getResumeRecord(workId);
@@ -1208,6 +1237,7 @@ function finishRun(props, workId, docIds, startTime) {
 
   props.setProperty('PHASE', PHASE_DONE);
   deleteTrigger();
+  writePanelStatus_('✅ すべて完了しました。');
   Logger.log('✅ すべて完了！');
 }
 
@@ -1564,4 +1594,217 @@ function resetAll() {
   props.deleteProperty('BATCH_QUEUE');
   Logger.log('リセット完了（途中状態を消去）。startFetch / startContinuation を再実行してください。');
   Logger.log('※ 続き取得記録は保持しています。記録も消すなら clearResumeRecord を実行してください。');
+}
+
+// ==========================================
+// 操作パネル（索引とは別のスプレッドシート）
+//   スクリプトを直接編集せず、パラメータをセルに入力してメニューから実行できるようにする。
+//   誤操作防止のため、チェックボックス等の onEdit 発火ではなく、
+//   カスタムメニューのクリック（明示操作）でのみ実行される。
+//
+//   setupControlPanel を一度だけ実行するとファイルが作成され、
+//   以後そのファイルを開くとメニュー「カクヨム操作」が表示される。
+// ==========================================
+
+// 操作パネルを作成/更新する（初回のみ実行。レイアウトを直した時の再実行も可）。
+function setupControlPanel() {
+  let ss = findControlPanelSheet_();
+  if (!ss) {
+    ss = SpreadsheetApp.create(CONTROL_PANEL_FILE_NAME);
+    try { DriveApp.getFileById(ss.getId()).moveTo(DriveApp.getFolderById(getTargetFolderId())); }
+    catch(e) { Logger.log('操作パネルのフォルダ移動失敗: ' + e); }
+    PropertiesService.getScriptProperties().setProperty('CONTROL_PANEL_SHEET_ID', ss.getId());
+  }
+
+  const sheet = ss.getSheets()[0];
+  sheet.setName(CONTROL_PANEL_SHEET_NAME);
+  sheet.clear();
+
+  const rows = [
+    ['カクヨム取得コンソール', ''],
+    ['', ''],
+    ['パラメータ', ''],
+    ['作品URL', ''],
+    ['開始話数（初回取得のみ・空欄=1）', ''],
+    ['終了話数（初回取得のみ・空欄=無制限）', ''],
+    ['既存ドキュメントID（任意・追加時のみ・カンマ区切り）', ''],
+    ['', ''],
+    ['実行は上部メニュー「カクヨム操作」から行ってください。', ''],
+    ['', ''],
+    ['ステータス', ''],
+    ['最終実行', '(未実行)'],
+  ];
+  sheet.getRange(1, 1, rows.length, 2).setValues(rows);
+  sheet.getRange(1, 1).setFontWeight('bold').setFontSize(14);
+  sheet.getRange(3, 1).setFontWeight('bold');
+  sheet.getRange(11, 1).setFontWeight('bold');
+  sheet.getRange(PANEL_CELL_STATUS).setWrap(true);
+  sheet.setColumnWidth(1, 360);
+  sheet.setColumnWidth(2, 420);
+
+  // 同じハンドラの古いトリガーが残っていれば削除してから登録し直す（重複実行防止）
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === 'onPanelOpen') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('onPanelOpen').forSpreadsheet(ss.getId()).onOpen().create();
+
+  Logger.log(`操作パネルを作成/更新しました: ${ss.getUrl()}`);
+  Logger.log('このファイルを開き直すと「カクヨム操作」メニューが表示されます。');
+}
+
+// 操作パネルを開いたときに呼ばれる（installable onOpen トリガー。setupControlPanel が登録）
+function onPanelOpen(e) {
+  SpreadsheetApp.getUi()
+    .createMenu('カクヨム操作')
+    .addItem('初回取得を実行', 'panelRunStartFetch')
+    .addItem('続き取得を実行', 'panelRunStartContinuation')
+    .addItem('一括続き取得を実行', 'panelRunStartContinuationAll')
+    .addSeparator()
+    .addItem('一覧に追加（現在地を記録）', 'panelRunSeedResumeRecord')
+    .addItem('一覧から削除', 'panelRunClearResumeRecord')
+    .addItem('索引シートと差分同期', 'panelRunSyncFromSheet')
+    .addSeparator()
+    .addItem('進捗確認', 'panelRunCheckProgress')
+    .addItem('索引を再生成', 'panelRunRebuildIndex')
+    .addToUi();
+}
+
+// パネルのシートオブジェクトを取得（見つからなければ null）
+function getPanelSheet_() {
+  const ss = findControlPanelSheet_();
+  if (!ss) return null;
+  return ss.getSheetByName(CONTROL_PANEL_SHEET_NAME) || ss.getSheets()[0];
+}
+
+// パネルのパラメータ欄を読み取る
+function getPanelInputs_(sheet) {
+  return {
+    url:          String(sheet.getRange(PANEL_CELL_URL).getValue() || '').trim(),
+    startEpisode: sheet.getRange(PANEL_CELL_START_EPISODE).getValue(),
+    endEpisode:   sheet.getRange(PANEL_CELL_END_EPISODE).getValue(),
+    docIds:       String(sheet.getRange(PANEL_CELL_DOC_IDS).getValue() || '')
+                    .split(',').map(s => s.trim()).filter(s => s),
+  };
+}
+
+// パネルのステータス欄に結果を書き戻す（パネル未作成時は何もしない）
+function writePanelStatus_(message) {
+  try {
+    const sheet = getPanelSheet_();
+    if (!sheet) return;
+    const stamp = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm:ss');
+    sheet.getRange(PANEL_CELL_STATUS).setValue(`[${stamp}] ${message}`);
+  } catch(e) { Logger.log('操作パネルへのステータス書き込み失敗: ' + e); }
+}
+
+// 進捗確認の要約（パネル用の簡潔版。詳細は checkProgress の実行ログを参照）
+function buildPanelProgressSummary_() {
+  const all = PropertiesService.getScriptProperties().getProperties();
+  if (!all.PHASE || all.PHASE === PHASE_DONE) {
+    return '実行中の処理はありません。';
+  }
+  const eps   = JSON.parse(all.EPISODES || '[]');
+  const queue = JSON.parse(all.BATCH_QUEUE || '[]');
+  const lines = [
+    `タイトル: ${all.TITLE || '(不明)'}`,
+    `フェーズ: ${all.PHASE}`,
+    `進捗: ${all.NEXT_INDEX || '0'} / ${eps.length} 話`,
+  ];
+  if (all.BATCH_MODE === '1') lines.push(`一括続き取得: 残り ${queue.length} 作品`);
+  return lines.join(' / ');
+}
+
+// ---- 以下、パネルのメニューから呼ばれるハンドラ ----
+
+function panelRunStartFetch() {
+  const sheet = getPanelSheet_();
+  if (!sheet) return;
+  const input = getPanelInputs_(sheet);
+  if (!input.url) { writePanelStatus_('エラー: 作品URLを入力してください。'); return; }
+
+  const ui = SpreadsheetApp.getUi();
+  const res = ui.alert('初回取得の確認',
+    `この作品を初回取得します。取得済みの場合は重複保存される可能性があります。\n\n${input.url}\n\n実行しますか？`,
+    ui.ButtonSet.YES_NO);
+  if (res !== ui.Button.YES) { writePanelStatus_('キャンセルしました（初回取得）。'); return; }
+
+  try {
+    startFetch(input.url, input.startEpisode, input.endEpisode);
+    writePanelStatus_(`初回取得を開始しました。進捗は「進捗確認」から確認してください。\n${input.url}`);
+  } catch(e) { writePanelStatus_('エラー: ' + e); }
+}
+
+function panelRunStartContinuation() {
+  const sheet = getPanelSheet_();
+  if (!sheet) return;
+  const input = getPanelInputs_(sheet);
+  if (!input.url) { writePanelStatus_('エラー: 作品URLを入力してください。'); return; }
+
+  try {
+    startContinuation(input.url);
+    writePanelStatus_(`続き取得を開始しました。進捗は「進捗確認」から確認してください。\n${input.url}`);
+  } catch(e) { writePanelStatus_('エラー: ' + e); }
+}
+
+function panelRunStartContinuationAll() {
+  const ui = SpreadsheetApp.getUi();
+  const res = ui.alert('一括続き取得の確認',
+    '続き取得の一覧にある全作品を順番に処理します。実行しますか？',
+    ui.ButtonSet.YES_NO);
+  if (res !== ui.Button.YES) { writePanelStatus_('キャンセルしました（一括続き取得）。'); return; }
+
+  try {
+    startContinuationAll();
+    writePanelStatus_('一括続き取得を開始しました。進捗は「進捗確認」から確認してください。');
+  } catch(e) { writePanelStatus_('エラー: ' + e); }
+}
+
+function panelRunSeedResumeRecord() {
+  const sheet = getPanelSheet_();
+  if (!sheet) return;
+  const input = getPanelInputs_(sheet);
+  if (!input.url) { writePanelStatus_('エラー: 作品URLを入力してください。'); return; }
+
+  try {
+    seedResumeRecord(input.url, input.docIds);
+    writePanelStatus_(`一覧に追加しました。\n${input.url}`);
+  } catch(e) { writePanelStatus_('エラー: ' + e); }
+}
+
+function panelRunClearResumeRecord() {
+  const sheet = getPanelSheet_();
+  if (!sheet) return;
+  const input = getPanelInputs_(sheet);
+  if (!input.url) { writePanelStatus_('エラー: 作品URLを入力してください。'); return; }
+
+  const ui = SpreadsheetApp.getUi();
+  const res = ui.alert('削除の確認',
+    `続き取得の一覧からこの作品を外します（取得済みドキュメント自体は削除されません）。\n\n${input.url}\n\n実行しますか？`,
+    ui.ButtonSet.YES_NO);
+  if (res !== ui.Button.YES) { writePanelStatus_('キャンセルしました（削除）。'); return; }
+
+  try {
+    clearResumeRecord(input.url);
+    writePanelStatus_(`一覧から削除しました。\n${input.url}`);
+  } catch(e) { writePanelStatus_('エラー: ' + e); }
+}
+
+function panelRunSyncFromSheet() {
+  try {
+    syncResumeRecordsFromSheet();
+    writePanelStatus_('索引シートと差分同期しました（詳細は実行ログを確認してください）。');
+  } catch(e) { writePanelStatus_('エラー: ' + e); }
+}
+
+function panelRunCheckProgress() {
+  try {
+    writePanelStatus_(buildPanelProgressSummary_());
+  } catch(e) { writePanelStatus_('エラー: ' + e); }
+}
+
+function panelRunRebuildIndex() {
+  try {
+    rebuildIndex();
+    writePanelStatus_('索引を再生成しました。');
+  } catch(e) { writePanelStatus_('エラー: ' + e); }
 }
