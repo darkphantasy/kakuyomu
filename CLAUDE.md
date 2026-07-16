@@ -53,7 +53,7 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 
 ## 実行する関数(ユーザー向けAPI)
 
-`startFetch` / `startContinuation` / `startContinuationAll` / `seedResumeRecord` / `checkResume` / `listResumeRecords` / `rebuildIndex` / `rebuildRecordsFromSheet` / `checkProgress` / `resetAll`(記録・索引は残し run 状態のみ消す)。デバッグ用に `START_EPISODE` / `END_EPISODE`(0=無制限)で取得範囲を絞れる(初回取得のみ有効)。
+`startFetch` / `startContinuation` / `startContinuationAll` / `seedResumeRecord`(続き取得の一覧に追加) / `clearResumeRecord`(続き取得の一覧から削除。記録のみでドキュメントは残る) / `checkResume` / `listResumeRecords` / `rebuildIndex` / `rebuildRecordsFromSheet` / `checkProgress` / `resetAll`(記録・索引は残し run 状態のみ消す)。デバッグ用に `START_EPISODE` / `END_EPISODE`(0=無制限)で取得範囲を絞れる(初回取得のみ有効)。
 
 ## 開発ワークフロー
 

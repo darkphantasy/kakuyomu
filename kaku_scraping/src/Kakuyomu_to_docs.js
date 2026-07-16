@@ -19,7 +19,8 @@
 //   startFetch            … 初回。全話を取得して保存。
 //   startContinuation     … 続き取得（KAKUYOMU_URL の作品）。
 //   startContinuationAll  … 索引の全作品を順に続き取得（一括）。
-//   seedResumeRecord      … 既存作品の現在地を記録（既存ドキュメントIDも登録可）。
+//   seedResumeRecord      … 続き取得の一覧に作品を追加（既存作品の現在地を記録。既存ドキュメントIDも登録可）。
+//   clearResumeRecord     … 続き取得の一覧から作品を削除（記録のみ削除。ドキュメント自体は残る）。
 //   checkResume           … 続き取得記録の確認。
 //   listResumeRecords     … 保存済み全作品の記録を一覧表示。
 //   rebuildIndex          … 索引スプレッドシートを今すぐ再生成。
@@ -566,12 +567,22 @@ function listResumeRecords() {
   });
 }
 
-// 続き取得記録の削除（KAKUYOMU_URL の作品）
+// ==========================================
+// 続き取得の一覧から作品を外す（KAKUYOMU_URL の作品）
+//   記録（RESUME_<workId>）を削除するだけで、取得済みの Google ドキュメント自体は削除しない。
+//   索引スプレッドシートもあわせて更新するので、実行後は一覧から消えて見える。
+//   ※ 再度追加したい場合は seedResumeRecord を実行する。
+// ==========================================
 function clearResumeRecord() {
   const workId = extractWorkId(KAKUYOMU_URL);
-  if (!workId) return;
+  if (!workId) { Logger.log('作品IDの取得失敗'); return; }
+
+  const rec = getResumeRecord(workId);
+  if (!rec) { Logger.log('この作品の続き取得記録はありません。'); return; }
+
   PropertiesService.getScriptProperties().deleteProperty(resumeKey(workId));
-  Logger.log('この作品の続き取得記録を削除しました。');
+  Logger.log(`続き取得の一覧から削除しました:「${rec.title || workId}」（ドキュメント自体は削除していません）`);
+  try { updateIndexSpreadsheet(); } catch(e) { Logger.log('索引シート更新エラー: ' + e); }
 }
 
 // ==========================================
