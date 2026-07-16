@@ -21,10 +21,11 @@
 //   startContinuationAll  … 索引の全作品を順に続き取得（一括）。
 //   seedResumeRecord      … 続き取得の一覧に作品を追加（既存作品の現在地を記録。既存ドキュメントIDも登録可）。
 //   clearResumeRecord     … 続き取得の一覧から作品を削除（記録のみ削除。ドキュメント自体は残る）。
+//   syncResumeRecordsFromSheet … 索引スプレッドシートの行を正として一覧を差分同期（行追加＝追加、行削除＝削除）。
 //   checkResume           … 続き取得記録の確認。
 //   listResumeRecords     … 保存済み全作品の記録を一覧表示。
 //   rebuildIndex          … 索引スプレッドシートを今すぐ再生成。
-//   rebuildRecordsFromSheet … 索引シートから記録を復元（スクリプト作り替え後の復旧用）。
+//   rebuildRecordsFromSheet … 索引シートから記録を全面復元（スクリプト作り替え後の復旧用。既存記録も上書き）。
 //   checkProgress         … 実行中の進捗確認。
 //   resetAll              … 途中状態のリセット（記録・索引は残す）。
 //
@@ -475,16 +476,9 @@ function extractHyperlinkUrl(formula) {
   return m ? m[1] : '';
 }
 
-// ==========================================
-// 索引スプレッドシートから RESUME 記録を復元する。
-//   スクリプトを作り替えて記録（Scriptプロパティ）を失った場合などに、
-//   フォルダ内の索引シートを読んで作品一覧・URL・ドキュメントIDを復元する。
-//   lastEpisodeId は不明（話数で照合）、lastCursor は0（続き取得時にバックフィル）。
-//   復元件数を返す。
-// ==========================================
-function rebuildRecordsFromSheet() {
+// 索引スプレッドシートを開く（INDEX_SHEET_ID → 無ければフォルダ内を名前で検索）。見つからなければ null。
+function findIndexSheet_() {
   const props = PropertiesService.getScriptProperties();
-
   let ss = null;
   const ssId = props.getProperty('INDEX_SHEET_ID');
   if (ssId) {
@@ -492,7 +486,6 @@ function rebuildRecordsFromSheet() {
     catch(e) { ss = null; }
   }
   if (!ss) {
-    // フォルダ内を名前で検索（プロパティが失われている場合）
     try {
       const folder = DriveApp.getFolderById(getTargetFolderId());
       const it = folder.getFilesByName(INDEX_SHEET_NAME);
@@ -503,6 +496,44 @@ function rebuildRecordsFromSheet() {
       }
     } catch(e) { Logger.log('索引シート検索エラー: ' + e); }
   }
+  return ss;
+}
+
+// 索引シートの1行をパースする（列: 0:タイトル 1:話数 2:ファイル数 3:最終更新 4:元URL 5..:ファイル）。
+//   無効な行（タイトル/URL/作品ID のいずれかが取れない）なら null。
+function parseIndexSheetRow_(values, formulas, r) {
+  const title = values[r][0];
+  if (!title) return null;
+  const url = extractHyperlinkUrl(formulas[r][4]) || String(values[r][4] || '');
+  if (!url) return null;
+  const workId = extractWorkId(url);
+  if (!workId) return null;
+
+  const docIds = [];
+  for (let c = 5; c < values[r].length; c++) {
+    const link = extractHyperlinkUrl(formulas[r][c]);
+    if (link) {
+      const m = link.match(/document\/d\/([a-zA-Z0-9_-]+)/);
+      if (m) docIds.push(m[1]);
+    }
+  }
+  return {
+    workId: workId, title: String(title), url: url, docIds: docIds,
+    total: Number(values[r][1]) || 0, updatedAt: String(values[r][3] || ''),
+  };
+}
+
+// ==========================================
+// 索引スプレッドシートから RESUME 記録を復元する。
+//   スクリプトを作り替えて記録（Scriptプロパティ）を失った場合などに、
+//   フォルダ内の索引シートを読んで作品一覧・URL・ドキュメントIDを復元する。
+//   lastEpisodeId は不明（話数で照合）、lastCursor は0（続き取得時にバックフィル）。
+//   既存の記録も無条件に上書きする（全面復元用）。差分だけ反映したい場合は
+//   syncResumeRecordsFromSheet を使うこと。
+//   復元件数を返す。
+// ==========================================
+function rebuildRecordsFromSheet() {
+  const ss = findIndexSheet_();
   if (!ss) { Logger.log('索引シートが見つかりません。'); return 0; }
 
   const sheet    = ss.getSheets()[0];
@@ -511,38 +542,108 @@ function rebuildRecordsFromSheet() {
   const formulas = range.getFormulas();
   if (values.length < 2) { Logger.log('索引シートにデータがありません。'); return 0; }
 
-  // 列: 0:タイトル 1:話数 2:ファイル数 3:最終更新 4:元URL 5..:ファイル
   let restored = 0;
   for (let r = 1; r < values.length; r++) {
-    const title = values[r][0];
-    if (!title) continue;
-    const url = extractHyperlinkUrl(formulas[r][4]) || String(values[r][4] || '');
-    if (!url) continue;
-    const workId = extractWorkId(url);
-    if (!workId) continue;
+    const row = parseIndexSheetRow_(values, formulas, r);
+    if (!row) continue;
 
-    const docIds = [];
-    for (let c = 5; c < values[r].length; c++) {
-      const link = extractHyperlinkUrl(formulas[r][c]);
-      if (link) {
-        const m = link.match(/document\/d\/([a-zA-Z0-9_-]+)/);
-        if (m) docIds.push(m[1]);
-      }
-    }
-
-    saveResumeRecord(workId, {
-      title:         String(title),
-      url:           url,
-      total:         Number(values[r][1]) || 0,
+    saveResumeRecord(row.workId, {
+      title:         row.title,
+      url:           row.url,
+      total:         row.total,
       lastEpisodeId: '',            // 不明 → 続き取得は話数フォールバックで起点判定
-      docIds:        docIds,
+      docIds:        row.docIds,
       lastCursor:    0,             // 不明 → 続き取得時に実ファイルからバックフィル
-      updatedAt:     String(values[r][3] || ''),
+      updatedAt:     row.updatedAt,
     });
     restored++;
   }
   Logger.log(`索引シートから ${restored} 作品の記録を復元しました。`);
   return restored;
+}
+
+// ==========================================
+// 索引スプレッドシートを正として、続き取得の一覧（RESUME_ 記録）と差分だけ同期する。
+//   - シートにあって記録が無い行 → 追加。Kakuyomu から現在地を取得して記録する
+//     （ファイル列に既存ドキュメントへの =HYPERLINK() があれば docIds として引き継ぐ）。
+//   - 記録にあってシートに行が無い作品 → 削除（記録のみ。ドキュメント自体は残る）。
+//   - 両方にある作品 → 記録側の内容（lastEpisodeId・lastCursor 等）はそのまま変更しない。
+//     シート側でタイトル等を手で書き換えても、次の updateIndexSpreadsheet で記録側の値に戻る。
+//   スプレッドシートの行を手で追加・削除するだけで、続き取得の一覧を管理できるようにするための関数。
+// ==========================================
+function syncResumeRecordsFromSheet() {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty('PHASE') && props.getProperty('PHASE') !== PHASE_DONE) {
+    Logger.log('別の取得が進行中です。完了後に実行してください（checkProgress で確認）。');
+    return;
+  }
+
+  const ss = findIndexSheet_();
+  if (!ss) { Logger.log('索引シートが見つかりません。'); return; }
+
+  const sheet    = ss.getSheets()[0];
+  const range    = sheet.getDataRange();
+  const values   = range.getValues();
+  const formulas = range.getFormulas();
+
+  const sheetWorks = {}; // workId -> {title, url, docIds, ...}
+  for (let r = 1; r < values.length; r++) {
+    const row = parseIndexSheetRow_(values, formulas, r);
+    if (row) sheetWorks[row.workId] = row;
+  }
+
+  const recordWorkIds = Object.keys(props.getProperties())
+    .filter(k => k.indexOf('RESUME_') === 0)
+    .map(k => k.replace('RESUME_', ''));
+
+  // 記録にあってシートに行が無い作品 → 削除
+  let removed = 0;
+  recordWorkIds.forEach(workId => {
+    if (sheetWorks[workId]) return;
+    const rec = getResumeRecord(workId);
+    props.deleteProperty(resumeKey(workId));
+    Logger.log(`[削除] シートから行が消えたため一覧から除外:「${(rec && rec.title) || workId}」`);
+    removed++;
+  });
+
+  // シートにあって記録が無い作品 → 追加（Kakuyomuから現在地を取得）
+  let added = 0;
+  Object.keys(sheetWorks).forEach(workId => {
+    if (getResumeRecord(workId)) return; // 既存はそのまま（lastEpisodeId等を保持）
+
+    const w = sheetWorks[workId];
+    Logger.log(`[追加] 新規行を検出:「${w.title}」(${w.url}) を取得します…`);
+
+    const topHtml = fetchHtml(w.url);
+    if (!topHtml) { Logger.log('  → 取得失敗のためスキップ'); return; }
+    const nextData    = extractNextData(topHtml);
+    const title       = extractTitle(topHtml, nextData, workId) || w.title;
+    const allEpisodes = collectAllEpisodes(topHtml, nextData, workId);
+    if (allEpisodes.length === 0) { Logger.log('  → エピソードが見つからないためスキップ'); return; }
+
+    let lastCursor = 0;
+    if (w.docIds.length > 0) {
+      try { lastCursor = getDocEndCursor(w.docIds[w.docIds.length - 1]); }
+      catch(e) { Logger.log('  → 末尾cursorの先取りに失敗（続き取得時にバックフィルします）: ' + e); }
+    }
+
+    saveResumeRecord(workId, {
+      title:         title,
+      url:           w.url,
+      total:         allEpisodes.length,
+      lastEpisodeId: allEpisodes[allEpisodes.length - 1].id,
+      docIds:        w.docIds,
+      lastCursor:    lastCursor,
+      updatedAt:     Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm'),
+    });
+    Logger.log(`  → 追加しました:「${title}」${allEpisodes.length} 話 / 既存ドキュメント ${w.docIds.length} 件`);
+    added++;
+  });
+
+  Logger.log(`同期完了: 追加 ${added} 件 / 削除 ${removed} 件`);
+  if (added > 0 || removed > 0) {
+    try { updateIndexSpreadsheet(); } catch(e) { Logger.log('索引シート更新エラー: ' + e); }
+  }
 }
 
 // 続き取得記録の確認（KAKUYOMU_URL の作品）
