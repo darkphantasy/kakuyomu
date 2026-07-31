@@ -6,7 +6,8 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 
 このリポジトリでは `kaku_scraping/src/` 以下に GAS プロジェクト(KAKU_SCRAPING)を clasp で同期している。
 
-- `kaku_scraping/src/Kakuyomu_to_docs.js` … 本体(単一ファイル)
+- `kaku_scraping/src/Kakuyomu_to_docs.js` … 本体。取得・整形パイプライン、続き取得、索引管理
+- `kaku_scraping/src/ControlPanel.js` … 操作パネル(別スプレッドシート)関連。GAS は同一プロジェクト内の複数ファイルを1つのグローバルスコープとして実行するため import/export は不要で、`Kakuyomu_to_docs.js` 側の関数・定数をそのまま参照できる。逆に `finishRun`(`Kakuyomu_to_docs.js`)は完了通知のため `writePanelStatus_` を直接呼んでおり、コア側からこのファイルへの依存が一部ある
 - `kaku_scraping/src/appsscript.json` … マニフェスト(Docs API 有効化・OAuthスコープ)
 - `kaku_scraping/src/Reformat_existing_docs.js` … 独立ツール。既存ドキュメントに現在の書式だけを再適用する
 

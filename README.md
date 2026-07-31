@@ -192,7 +192,8 @@ GAS エディタ側で直接編集した内容は `sync-from-gas.yml` が毎日�
 │   ├── .clasp.json           # スクリプトID設定
 │   └── src/
 │       ├── appsscript.json   # GASマニフェスト
-│       ├── Kakuyomu_to_docs.js
+│       ├── Kakuyomu_to_docs.js   # 本体（取得・整形パイプライン）
+│       ├── ControlPanel.js       # 操作パネル（別スプレッドシートからの実行）
 │       └── Reformat_existing_docs.js
 └── .github/workflows/
     ├── sync-from-gas.yml     # GAS → GitHub 自動同期(毎日)
