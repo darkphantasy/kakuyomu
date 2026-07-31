@@ -33,6 +33,7 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 - **BUILD** (`runBuildPhase`): バッファごとに `parseBufferForBuild` で ■ 除去・空行除去・行頭字下げ正規化(後述)を済ませたクリーンテキストと見出し位置を作り、`insertCleanIntoDoc` が 1 回の `batchUpdate` で挿入＋整形。`MAX_DOC_CHARS=900000` 超過で新規分冊(`HEADER_GUARD_CHARS` でヘッダのみ分冊の無限ループを防止)。最後にフッター(取得記録)を挿入。**再開時は必ず実終端を読み直して cursor 同期**。
 - **続き取得** (`startContinuation` / `prepareContinuation`): `RESUME_<workId>` 記録の `lastEpisodeId` を現目次と照合して差分だけ取得(見つからなければ話数フォールバック)。既存末尾ドキュメントへ追記。追記境界には `\n\n` を先に挿入し前段落との連結を防ぐ。
 - **一括続き取得** (`startContinuationAll`): 全 `RESUME_` 記録をキュー(`BATCH_MODE`/`BATCH_QUEUE`)に積み、1 作品ずつ完走→次へ。新着なしはスキップ。**記録が 1 件も無ければ索引シートから復元**(`rebuildRecordsFromSheet`)してから回す。
+- **自動キューイング**: run 状態は単一スロット・`continuesFetch` の再開トリガーも 1 本しか持てないため**同時実行は不可**。そこで `startFetch` / `startContinuation` / `startContinuationAll` は先頭で `isRunActive_` を見て、実行中なら**エラーにせず `enqueueWork_` でキュー末尾に積む**(`BATCH_MODE='1'` もここで立てる)。完了時は既存の `finishRun` のバッチ分岐がそのまま次を取り出すので、非バッチで始まった run の後ろにも継ぎ足せる。キュー要素は `{url, mode:'fetch'|'cont', startEpisode?, endEpisode?}`。**旧形式(workId の文字列)も `normalizeQueueEntry_` が続き取得として受理**するので、移行中の残存キューは壊れない。`startFetch` は `prepareFetch`(run 状態をセットして true を返すだけ)と起動部に分割済みで、`batchStartNext` が mode で `prepareFetch` / `prepareContinuation` を出し分ける。
 - **索引**: スプレッドシートのみ(Doc 版索引は削除済み)。`updateIndexSpreadsheet` が全記録から再生成。1 作品 1 行、列は「タイトル/話数/ファイル数/最終更新/元URL/ファイル1..N」(N は最大分冊数に合わせ可変、リンクは `=HYPERLINK()`)。ID は `INDEX_SHEET_ID` プロパティに保持。シート内のタブ名は `INDEX_SHEET_TAB_NAME`(='索引')固定。索引シートを開く処理は `findOrLocateSpreadsheet_(propKey, fileName)` に共通化(`findIndexSheet_` はこのラッパー)。
 - **操作パネル**: 索引とは別のスプレッドシート(`CONTROL_PANEL_FILE_NAME`、同じ保存先フォルダに作成)。`setupControlPanel` で作成し、そのファイルに installable な onOpen トリガー(`onPanelOpen`)を登録する。パネルを開くとカスタムメニュー「カクヨム操作」が出る。**実行は必ずメニュークリックのみ**(誤操作防止のため onEdit/チェックボックスは使わない)。パラメータはセル(`PANEL_CELL_*`)から読み取り、各 `panelRunXxx` ハンドラが対応する関数(`startFetch`/`startContinuation`/`seedResumeRecord`/`clearResumeRecord`/`syncResumeRecordsFromSheet`/`rebuildIndex`)を呼び、結果をステータスセル(`PANEL_CELL_STATUS`)に書き戻す(`writePanelStatus_`)。多段実行(`startFetch`/`startContinuation`/`startContinuationAll`)は開始時点のメッセージのみ即時反映し、真の完了は `finishRun` の `PHASE_DONE` セット時に `writePanelStatus_` で改めて通知する。パネル未作成時、`writePanelStatus_` は何もしない(呼び出し元を壊さない)。
 
@@ -40,7 +41,7 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 
 - `RUN_STATE_KEYS` に列挙されたキー … 実行中の一時状態。`clearRunState` で消える。
 - `RESUME_<workId>` … 永続記録 `{title,url,total,lastEpisodeId,docIds,lastCursor,updatedAt}`。`lastCursor` は参考値であり**位置決定には使わない**。
-- `BATCH_MODE` / `BATCH_QUEUE` … 一括続き取得のキュー(RUN_STATE_KEYS 外＝作品完了で消えない)。
+- `BATCH_MODE` / `BATCH_QUEUE` … 取得の順番待ちキュー(RUN_STATE_KEYS 外＝作品完了で消えない)。要素は `{url,mode,startEpisode?,endEpisode?}`(旧形式の workId 文字列も受理)。一括続き取得だけでなく、実行中に投げられた単発の取得もここに積まれる。
 - `INDEX_SHEET_ID` … 索引スプレッドシートの ID。
 - `CONTROL_PANEL_SHEET_ID` … 操作パネルスプレッドシートの ID。
 
@@ -57,7 +58,7 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 
 `startFetch(url?, startEpisode?, endEpisode?)` / `startContinuation(url?)` / `startContinuationAll` / `seedResumeRecord(url?, existingDocIds?)`(続き取得の一覧に追加) / `clearResumeRecord(url?)`(続き取得の一覧から削除。記録のみでドキュメントは残る) / `syncResumeRecordsFromSheet`(索引シートの行を正として一覧を差分同期。行追加=追加・行削除=削除、既存作品の記録は変更しない) / `checkResume(url?)` / `listResumeRecords` / `rebuildIndex` / `rebuildRecordsFromSheet`(索引シートから記録を全面復元。既存記録も上書きする点が syncResumeRecordsFromSheet と異なる) / `checkProgress` / `resetAll`(記録・索引は残し run 状態のみ消す) / `setupControlPanel`(操作パネルの作成・更新。初回のみ実行)。URL引数は省略時 `KAKUYOMU_URL` にフォールバックするので、エディタからの直接実行(引数なし)も従来どおり可能。デバッグ用に `START_EPISODE` / `END_EPISODE`(0=無制限)で取得範囲を絞れる(初回取得のみ有効。`startFetch` の引数でも上書き可)。
 
-操作パネルのメニューハンドラ(`panelRunXxx`、`onPanelOpen`)はパネル経由でのみ呼ばれる内部関数で、ユーザーがエディタから直接実行するものではない。
+操作パネルのメニューハンドラ(`panelRunXxx`、`onPanelOpen`)はパネル経由でのみ呼ばれる内部関数で、ユーザーがエディタから直接実行するものではない。`panelRunClearQueue` は順番待ちのみを取り消し、実行中の run は止めない。
 
 ## 開発ワークフロー
 

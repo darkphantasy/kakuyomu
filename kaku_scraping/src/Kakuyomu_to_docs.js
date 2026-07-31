@@ -153,20 +153,78 @@ function buildFooterLines(props) {
 }
 
 // ==========================================
+// 取得キュー（順番待ち）
+//   run 状態は単一スロットのため同時実行できない。実行中に新しい取得を
+//   投げた場合はエラーにせずキューへ積み、finishRun が完了時に次を取り出す。
+// ==========================================
+
+// 取得が進行中か（PHASE が立っていて DONE でない）
+function isRunActive_(props) {
+  const phase = props.getProperty('PHASE');
+  return !!phase && phase !== PHASE_DONE;
+}
+
+// キューに1件積む。積んだ後のキュー長を返す。
+//   entry: {url, mode:'fetch'|'cont', startEpisode?, endEpisode?}
+function enqueueWork_(props, entry) {
+  const queue = JSON.parse(props.getProperty('BATCH_QUEUE') || '[]');
+  queue.push(entry);
+  props.setProperties({ BATCH_MODE: '1', BATCH_QUEUE: JSON.stringify(queue) });
+  return queue.length;
+}
+
+// キュー要素を正規化する。
+//   旧形式（workId の文字列）は続き取得として扱い、後方互換を保つ。
+function normalizeQueueEntry_(item) {
+  if (typeof item === 'string') return { workId: item, mode: 'cont' };
+  return item || {};
+}
+
+// キューの中身を人が読める1行に（パネル表示用）
+function describeQueue_(props) {
+  const queue = JSON.parse(props.getProperty('BATCH_QUEUE') || '[]');
+  if (queue.length === 0) return '順番待ち: なし';
+  const names = queue.map(item => {
+    const e   = normalizeQueueEntry_(item);
+    const id  = e.workId || extractWorkId(e.url || '') || '?';
+    const rec = getResumeRecord(id);
+    const label = (rec && rec.title) || e.url || id;
+    return `${label}${e.mode === 'fetch' ? '（初回）' : ''}`;
+  });
+  return `順番待ち ${queue.length} 件: ${names.join(' → ')}`;
+}
+
+// ==========================================
 // ① 最初に1回だけ手動実行
+//   実行中の取得があれば自動でキューに積む（順番待ち）。
 // ==========================================
 function startFetch(url, startEpisode, endEpisode) {
+  const props = PropertiesService.getScriptProperties();
+  if (isRunActive_(props)) {
+    const n = enqueueWork_(props, {
+      url: url || KAKUYOMU_URL, mode: 'fetch',
+      startEpisode: startEpisode, endEpisode: endEpisode,
+    });
+    Logger.log(`実行中の取得があるため、キューに追加しました（順番待ち ${n} 件目）。`);
+    return;
+  }
+  if (prepareFetch(url, startEpisode, endEpisode)) continuesFetch();
+}
+
+// 初回取得の準備。run 状態をセットしたら true、失敗なら false。
+//   ※ 実際の取得開始（continuesFetch / トリガー）は呼び出し側が行う。
+function prepareFetch(url, startEpisode, endEpisode) {
   const targetUrl = url || KAKUYOMU_URL;
   const startEp   = (startEpisode === undefined || startEpisode === null || startEpisode === '') ? START_EPISODE : Number(startEpisode);
   const endEp     = (endEpisode   === undefined || endEpisode   === null || endEpisode   === '') ? END_EPISODE   : Number(endEpisode);
 
   const workId = extractWorkId(targetUrl);
-  if (!workId) { Logger.log('作品IDの取得失敗'); return; }
+  if (!workId) { Logger.log('作品IDの取得失敗'); return false; }
 
   Logger.log(`作品ID: ${workId}`);
 
   const topHtml = fetchHtml(targetUrl);
-  if (!topHtml) return;
+  if (!topHtml) return false;
 
   const nextData    = extractNextData(topHtml);
   const title       = extractTitle(topHtml, nextData, workId);
@@ -178,7 +236,7 @@ function startFetch(url, startEpisode, endEpisode) {
   if (allEpisodes.length === 0) {
     Logger.log('エピソードが見つかりません。__NEXT_DATA__ を確認します。');
     if (nextData) Logger.log(JSON.stringify(nextData).substring(0, 3000));
-    return;
+    return false;
   }
 
   const startIndex = Math.max(0, Math.min(startEp - 1, allEpisodes.length - 1));
@@ -186,7 +244,7 @@ function startFetch(url, startEpisode, endEpisode) {
                                  : allEpisodes.length;
   if (endEx <= startIndex) {
     Logger.log(`END_EPISODE(${endEp}) が START_EPISODE(${startEp}) 以下です。設定を確認してください。`);
-    return;
+    return false;
   }
   const episodes = allEpisodes.slice(startIndex, endEx)
     .map((e, j) => ({ ...e, no: startIndex + j + 1 })); // no=作品全体での通し番号(1始まり)
@@ -210,8 +268,8 @@ function startFetch(url, startEpisode, endEpisode) {
     PHASE:           PHASE_FETCHING,
   });
 
-  Logger.log('取得フェーズ開始');
-  continuesFetch();
+  Logger.log('取得フェーズ準備完了');
+  return true;
 }
 
 // ==========================================
@@ -219,6 +277,12 @@ function startFetch(url, startEpisode, endEpisode) {
 //   記録が無い場合は seedResumeRecord か startFetch を案内する。
 // ==========================================
 function startContinuation(url) {
+  const props = PropertiesService.getScriptProperties();
+  if (isRunActive_(props)) {
+    const n = enqueueWork_(props, { url: url || KAKUYOMU_URL, mode: 'cont' });
+    Logger.log(`実行中の取得があるため、キューに追加しました（順番待ち ${n} 件目）。`);
+    return;
+  }
   if (prepareContinuation(url || KAKUYOMU_URL)) continuesFetch();
 }
 
@@ -227,12 +291,6 @@ function startContinuation(url) {
 //   新着が無い作品は飛ばす。
 function startContinuationAll() {
   const props = PropertiesService.getScriptProperties();
-
-  // 実行中（run状態あり）なら多重起動を避ける
-  if (props.getProperty('PHASE') && props.getProperty('PHASE') !== PHASE_DONE) {
-    Logger.log('別の取得が進行中です。完了後に実行してください（checkProgress で確認）。');
-    return;
-  }
 
   let all  = props.getProperties();
   let keys = Object.keys(all).filter(k => k.indexOf('RESUME_') === 0);
@@ -248,9 +306,21 @@ function startContinuationAll() {
   }
   if (keys.length === 0) { Logger.log('続き取得できる作品がありません。'); return; }
 
-  const queue = keys.map(k => k.replace('RESUME_', ''));   // workId の配列
-  props.setProperties({ BATCH_MODE: '1', BATCH_QUEUE: JSON.stringify(queue) });
-  Logger.log(`一括続き取得：${queue.length} 作品を順に処理します。`);
+  const entries = keys.map(k => ({ workId: k.replace('RESUME_', ''), mode: 'cont' }));
+
+  // 実行中なら全作品をキューの末尾に積むだけにする（現在の取得は止めない）
+  if (isRunActive_(props)) {
+    const queue = JSON.parse(props.getProperty('BATCH_QUEUE') || '[]');
+    props.setProperties({
+      BATCH_MODE:  '1',
+      BATCH_QUEUE: JSON.stringify(queue.concat(entries)),
+    });
+    Logger.log(`実行中の取得があるため、${entries.length} 作品をキューに追加しました（順番待ち計 ${queue.length + entries.length} 件）。`);
+    return;
+  }
+
+  props.setProperties({ BATCH_MODE: '1', BATCH_QUEUE: JSON.stringify(entries) });
+  Logger.log(`一括続き取得：${entries.length} 作品を順に処理します。`);
 
   if (!batchStartNext(props)) {
     props.deleteProperty('BATCH_MODE');
@@ -261,20 +331,36 @@ function startContinuationAll() {
   continuesFetch(); // 先頭作品をすぐ開始
 }
 
-// バッチキューから次の作品を取り出し、続き取得の準備をする。
-//   新着があり run 状態をセットできたら true（PHASE=FETCHING）。
+// バッチキューから次の作品を取り出し、取得の準備をする。
+//   run 状態をセットできたら true（PHASE=FETCHING）。
 //   キューを使い切ったら false。トリガー管理は呼び出し側が行う。
+//   キュー要素は {url, mode:'fetch'|'cont', startEpisode?, endEpisode?}。
+//   旧形式（workId の文字列）も続き取得として受け付ける。
 function batchStartNext(props) {
   let queue = JSON.parse(props.getProperty('BATCH_QUEUE') || '[]');
   while (queue.length > 0) {
-    const workId = queue.shift();
+    const entry = normalizeQueueEntry_(queue.shift());
     props.setProperty('BATCH_QUEUE', JSON.stringify(queue));
 
-    const rec = getResumeRecord(workId);
-    if (!rec || !rec.url) { Logger.log(`URL記録なし、スキップ: ${workId}`); continue; }
+    if (entry.mode === 'fetch') {
+      if (!entry.url) { Logger.log('URLなし、スキップ（初回取得）'); continue; }
+      Logger.log(`▼ 次の作品（初回取得）: ${entry.url}`);
+      if (prepareFetch(entry.url, entry.startEpisode, entry.endEpisode)) return true;
+      continue; // 準備できなければ次へ
+    }
 
-    Logger.log(`▼ 次の作品: ${rec.title || workId}`);
-    if (prepareContinuation(rec.url)) return true; // 新着あり → 次回 FETCHING
+    // 続き取得：URL 指定があればそれを、無ければ記録から引く
+    let url = entry.url;
+    let label = url;
+    const workId = entry.workId || extractWorkId(url || '');
+    if (workId) {
+      const rec = getResumeRecord(workId);
+      if (rec && rec.url) { url = url || rec.url; label = rec.title || url || workId; }
+    }
+    if (!url) { Logger.log(`URL記録なし、スキップ: ${workId || '(不明)'}`); continue; }
+
+    Logger.log(`▼ 次の作品: ${label}`);
+    if (prepareContinuation(url)) return true; // 新着あり → 次回 FETCHING
     // 新着なし → 次の作品へ
   }
   return false;
@@ -600,7 +686,8 @@ function rebuildRecordsFromSheet() {
 // ==========================================
 function syncResumeRecordsFromSheet() {
   const props = PropertiesService.getScriptProperties();
-  if (props.getProperty('PHASE') && props.getProperty('PHASE') !== PHASE_DONE) {
+  // 記録そのものを書き換える操作なので、取得系と違いキューには積まず実行中は断る
+  if (isRunActive_(props)) {
     Logger.log('別の取得が進行中です。完了後に実行してください（checkProgress で確認）。');
     return;
   }
@@ -1226,6 +1313,7 @@ function finishRun(props, workId, docIds, startTime) {
       } else {
         props.setProperty('PHASE', PHASE_BATCH_NEXT);
         ensureTriggerAfter();
+        writePanelStatus_(`1作品完了。次の作品へ進みます（残り ${queue.length} 件）。`);
         Logger.log(`次の作品へ（残り ${queue.length} 作品）。`);
         return;
       }
@@ -1664,7 +1752,8 @@ function onPanelOpen(e) {
     .addItem('一覧から削除', 'panelRunClearResumeRecord')
     .addItem('索引シートと差分同期', 'panelRunSyncFromSheet')
     .addSeparator()
-    .addItem('進捗確認', 'panelRunCheckProgress')
+    .addItem('進捗・順番待ちを確認', 'panelRunCheckProgress')
+    .addItem('順番待ちをクリア', 'panelRunClearQueue')
     .addItem('索引を再生成', 'panelRunRebuildIndex')
     .addToUi();
 }
@@ -1699,19 +1788,20 @@ function writePanelStatus_(message) {
 
 // 進捗確認の要約（パネル用の簡潔版。詳細は checkProgress の実行ログを参照）
 function buildPanelProgressSummary_() {
-  const all = PropertiesService.getScriptProperties().getProperties();
+  const props = PropertiesService.getScriptProperties();
+  const all   = props.getProperties();
+  const queueLine = describeQueue_(props);
+
   if (!all.PHASE || all.PHASE === PHASE_DONE) {
-    return '実行中の処理はありません。';
+    return `実行中の処理はありません。\n${queueLine}`;
   }
-  const eps   = JSON.parse(all.EPISODES || '[]');
-  const queue = JSON.parse(all.BATCH_QUEUE || '[]');
-  const lines = [
-    `タイトル: ${all.TITLE || '(不明)'}`,
+  const eps = JSON.parse(all.EPISODES || '[]');
+  const running = [
+    `実行中: ${all.TITLE || '(不明)'}`,
     `フェーズ: ${all.PHASE}`,
     `進捗: ${all.NEXT_INDEX || '0'} / ${eps.length} 話`,
-  ];
-  if (all.BATCH_MODE === '1') lines.push(`一括続き取得: 残り ${queue.length} 作品`);
-  return lines.join(' / ');
+  ].join(' / ');
+  return `${running}\n${queueLine}`;
 }
 
 // ---- 以下、パネルのメニューから呼ばれるハンドラ ----
@@ -1722,15 +1812,22 @@ function panelRunStartFetch() {
   const input = getPanelInputs_(sheet);
   if (!input.url) { writePanelStatus_('エラー: 作品URLを入力してください。'); return; }
 
+  const props   = PropertiesService.getScriptProperties();
+  const wasBusy = isRunActive_(props);
+
   const ui = SpreadsheetApp.getUi();
   const res = ui.alert('初回取得の確認',
-    `この作品を初回取得します。取得済みの場合は重複保存される可能性があります。\n\n${input.url}\n\n実行しますか？`,
+    `この作品を初回取得します。取得済みの場合は重複保存される可能性があります。\n\n${input.url}\n\n` +
+    (wasBusy ? '※ 現在ほかの取得が実行中のため、順番待ちに追加されます。\n\n' : '') +
+    '実行しますか？',
     ui.ButtonSet.YES_NO);
   if (res !== ui.Button.YES) { writePanelStatus_('キャンセルしました（初回取得）。'); return; }
 
   try {
     startFetch(input.url, input.startEpisode, input.endEpisode);
-    writePanelStatus_(`初回取得を開始しました。進捗は「進捗確認」から確認してください。\n${input.url}`);
+    writePanelStatus_(wasBusy
+      ? `実行中の取得があるため、キューに追加しました（順番待ちに入りました）。\n${input.url}\n${describeQueue_(props)}`
+      : `初回取得を開始しました。進捗は「進捗確認」から確認してください。\n${input.url}`);
   } catch(e) { writePanelStatus_('エラー: ' + e); }
 }
 
@@ -1740,22 +1837,33 @@ function panelRunStartContinuation() {
   const input = getPanelInputs_(sheet);
   if (!input.url) { writePanelStatus_('エラー: 作品URLを入力してください。'); return; }
 
+  const props = PropertiesService.getScriptProperties();
+  const wasBusy = isRunActive_(props);
   try {
     startContinuation(input.url);
-    writePanelStatus_(`続き取得を開始しました。進捗は「進捗確認」から確認してください。\n${input.url}`);
+    writePanelStatus_(wasBusy
+      ? `実行中の取得があるため、キューに追加しました（順番待ちに入りました）。\n${input.url}\n${describeQueue_(props)}`
+      : `続き取得を開始しました。進捗は「進捗確認」から確認してください。\n${input.url}`);
   } catch(e) { writePanelStatus_('エラー: ' + e); }
 }
 
 function panelRunStartContinuationAll() {
+  const props   = PropertiesService.getScriptProperties();
+  const wasBusy = isRunActive_(props);
+
   const ui = SpreadsheetApp.getUi();
   const res = ui.alert('一括続き取得の確認',
-    '続き取得の一覧にある全作品を順番に処理します。実行しますか？',
+    '続き取得の一覧にある全作品を順番に処理します。\n\n' +
+    (wasBusy ? '※ 現在ほかの取得が実行中のため、順番待ちの末尾に追加されます。\n\n' : '') +
+    '実行しますか？',
     ui.ButtonSet.YES_NO);
   if (res !== ui.Button.YES) { writePanelStatus_('キャンセルしました（一括続き取得）。'); return; }
 
   try {
     startContinuationAll();
-    writePanelStatus_('一括続き取得を開始しました。進捗は「進捗確認」から確認してください。');
+    writePanelStatus_(wasBusy
+      ? `実行中の取得があるため、全作品をキューに追加しました。\n${describeQueue_(props)}`
+      : '一括続き取得を開始しました。進捗は「進捗確認」から確認してください。');
   } catch(e) { writePanelStatus_('エラー: ' + e); }
 }
 
@@ -1800,6 +1908,23 @@ function panelRunCheckProgress() {
   try {
     writePanelStatus_(buildPanelProgressSummary_());
   } catch(e) { writePanelStatus_('エラー: ' + e); }
+}
+
+// 順番待ちだけを取り消す（実行中の取得はそのまま続行させる）
+function panelRunClearQueue() {
+  const props = PropertiesService.getScriptProperties();
+  const queue = JSON.parse(props.getProperty('BATCH_QUEUE') || '[]');
+  if (queue.length === 0) { writePanelStatus_('順番待ちはありません。'); return; }
+
+  const ui = SpreadsheetApp.getUi();
+  const res = ui.alert('順番待ちのクリア',
+    `順番待ち ${queue.length} 件を取り消します（実行中の取得はそのまま続行します）。実行しますか？`,
+    ui.ButtonSet.YES_NO);
+  if (res !== ui.Button.YES) { writePanelStatus_('キャンセルしました（順番待ちのクリア）。'); return; }
+
+  props.setProperty('BATCH_QUEUE', '[]');
+  if (!isRunActive_(props)) props.deleteProperty('BATCH_MODE');
+  writePanelStatus_(`順番待ち ${queue.length} 件を取り消しました。`);
 }
 
 function panelRunRebuildIndex() {
