@@ -173,18 +173,10 @@ function normalizeQueueEntry_(item) {
   return item || {};
 }
 
-// キューの中身を人が読める1行に（パネル表示用）
+// キューの中身を人が読める1行に（パネル表示用。件数のみ）
 function describeQueue_(props) {
   const queue = JSON.parse(props.getProperty('BATCH_QUEUE') || '[]');
-  if (queue.length === 0) return '順番待ち: なし';
-  const names = queue.map(item => {
-    const e   = normalizeQueueEntry_(item);
-    const id  = e.workId || extractWorkId(e.url || '') || '?';
-    const rec = getResumeRecord(id);
-    const label = (rec && rec.title) || e.url || id;
-    return `${label}${e.mode === 'fetch' ? '（初回）' : ''}`;
-  });
-  return `順番待ち ${queue.length} 件: ${names.join(' → ')}`;
+  return queue.length === 0 ? '順番待ち: なし' : `順番待ち: ${queue.length} 件`;
 }
 
 // ==========================================

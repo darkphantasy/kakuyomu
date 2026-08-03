@@ -129,6 +129,9 @@ function buildPanelProgressSummary_() {
   if (!all.PHASE || all.PHASE === PHASE_DONE) {
     return `実行中の処理はありません。\n${queueLine}`;
   }
+  if (all.PHASE === PHASE_BATCH_NEXT) {
+    return `1作品完了。次の作品の準備中です（次回トリガーで再開、最大1分程度）。\n${queueLine}`;
+  }
   const eps = JSON.parse(all.EPISODES || '[]');
   const running = [
     `実行中: ${all.TITLE || '(不明)'}`,
