@@ -67,7 +67,7 @@ const RUN_STATE_KEYS = [
   'EPISODES', 'NEXT_INDEX', 'PHASE', 'BUF_COUNT', 'DOC_IDS',
   'CONTINUATION', 'CONT_FROM', 'CONT_TO', 'CONT_LAST_CURSOR',
   'BUILD_BUF_INDEX', 'BUILD_CURSOR', 'BUILD_DOC_ID', 'BUILD_DOC_PART',
-  'BUILD_FOOTER_DONE',
+  'BUILD_FOOTER_DONE', 'BUILD_NEED_SEP',
 ];
 
 // ==========================================
@@ -971,6 +971,10 @@ function runBuildPhase(props, startTime) {
   let docId      = props.getProperty('BUILD_DOC_ID') || '';
   let docPart    = parseInt(props.getProperty('BUILD_DOC_PART') || '0');
   let docIds     = JSON.parse(props.getProperty('DOC_IDS') || '[]');
+  // 次のバッファ挿入前に区切りの改行が要るか（バッファをまたいで前段落と
+  // 次の見出しが同一段落に連結するのを防ぐ。新規ドキュメント作成直後・
+  // 続き取得の追記直後は既に区切り済みなので false）。
+  let needSep    = props.getProperty('BUILD_NEED_SEP') === '1';
 
   const contLabel = isCont
     ? `（続き ${props.getProperty('CONT_FROM')}〜${props.getProperty('CONT_TO')}話）`
@@ -1009,7 +1013,8 @@ function runBuildPhase(props, startTime) {
       cursor = created.cursor;
       docIds.push(docId);
     }
-    persistBuild(props, bufIndex, cursor, docId, docPart, docIds);
+    needSep = false; // 上のどちらの経路でも、この時点で既に段落が区切られている
+    persistBuild(props, bufIndex, cursor, docId, docPart, docIds, needSep);
   } else {
     // 再開時：前回実行以降にドキュメントが編集（読了分の削除など）されていても
     // 末尾へ正しく追記できるよう、実ファイルの終端を読み直して cursor を同期する。
@@ -1027,7 +1032,7 @@ function runBuildPhase(props, startTime) {
 
   while (bufIndex < bufCount) {
     if (Date.now() - startTime > TIMEOUT_THRESHOLD_MS) {
-      persistBuild(props, bufIndex, cursor, docId, docPart, docIds);
+      persistBuild(props, bufIndex, cursor, docId, docPart, docIds, needSep);
       ensureTriggerAfter();
       return;
     }
@@ -1037,7 +1042,7 @@ function runBuildPhase(props, startTime) {
     if (!bufFile) {
       Logger.log(`バッファ無し: ${fileName} スキップ`);
       bufIndex++;
-      persistBuild(props, bufIndex, cursor, docId, docPart, docIds);
+      persistBuild(props, bufIndex, cursor, docId, docPart, docIds, needSep);
       continue;
     }
     const bufContent = bufFile.getBlob().getDataAsString('UTF-8');
@@ -1051,16 +1056,30 @@ function runBuildPhase(props, startTime) {
       docId  = created.docId;
       cursor = created.cursor;
       docIds.push(docId);
-      persistBuild(props, bufIndex, cursor, docId, docPart, docIds);
+      needSep = false; // 新ドキュメントのヘッダ直後なので区切り済み
+      persistBuild(props, bufIndex, cursor, docId, docPart, docIds, needSep);
       Logger.log(`上限到達。新ドキュメントへ（${docIds.length} 冊目）`);
+    }
+
+    // 前バッファの最終段落と今回の先頭（見出し）が同一段落に連結しないよう、
+    // 必要なら区切りの改行を1つ入れてから挿入する。
+    if (needSep) {
+      try {
+        Docs.Documents.batchUpdate(
+          { requests: [{ insertText: { location: { index: cursor }, text: '\n' } }] },
+          docId
+        );
+        cursor += 1;
+      } catch(e) { Logger.log('バッファ間の区切り改行挿入に失敗: ' + e); }
     }
 
     insertCleanIntoDoc(docId, cursor, parsed);
     cursor += parsed.clean.length;
+    needSep = true; // 次バッファがあれば区切りが必要
 
     try { bufFile.setTrashed(true); } catch(e) { Logger.log('バッファ削除失敗: ' + e); }
     bufIndex++;
-    persistBuild(props, bufIndex, cursor, docId, docPart, docIds);
+    persistBuild(props, bufIndex, cursor, docId, docPart, docIds, needSep);
     Logger.log(`バッファ ${bufIndex}/${bufCount} 反映（cursor ${cursor}）`);
   }
 
@@ -1234,13 +1253,14 @@ function docsBatch(docId, requests) {
   }
 }
 
-function persistBuild(props, bufIndex, cursor, docId, docPart, docIds) {
+function persistBuild(props, bufIndex, cursor, docId, docPart, docIds, needSep) {
   props.setProperties({
     BUILD_BUF_INDEX: String(bufIndex),
     BUILD_CURSOR:    String(cursor),
     BUILD_DOC_ID:    docId,
     BUILD_DOC_PART:  String(docPart),
     DOC_IDS:         JSON.stringify(docIds),
+    BUILD_NEED_SEP:  needSep ? '1' : '',
   });
 }
 
