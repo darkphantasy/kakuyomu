@@ -55,20 +55,22 @@ function reformatAllDocs() {
 //   段落の位置・見出し種別のみ取得（本文テキストは取らない＝低メモリ）。
 // ==========================================
 function reformatDoc(docId) {
+  // startIndex は取得しない（巨大ドキュメントで要素数が多いとOOMするため）。
+  //   各要素の開始位置は、内容が連続している前提で直前要素の終端から復元する。
   const doc = Docs.Documents.get(docId, {
-    fields: 'body.content(startIndex,endIndex,paragraph.paragraphStyle.namedStyleType)'
+    fields: 'body.content(endIndex,paragraph.paragraphStyle.namedStyleType)'
   });
   const content = (doc.body && doc.body.content) || [];
 
-  let end = 0;
+  let end = 1; // ドキュメント本文の先頭インデックス
   const headings = []; // HEADING_2 / HEADING_3 の段落（タイトル・話見出し）
   for (const el of content) {
+    const start = end; // 直前要素の終端＝この要素の開始位置
     if (typeof el.endIndex === 'number' && el.endIndex > end) end = el.endIndex;
     if (!el.paragraph) continue;
     const ns = el.paragraph.paragraphStyle && el.paragraph.paragraphStyle.namedStyleType;
-    if ((ns === 'HEADING_2' || ns === 'HEADING_3') &&
-        typeof el.startIndex === 'number' && typeof el.endIndex === 'number') {
-      headings.push({ start: el.startIndex, end: el.endIndex - 1 });
+    if ((ns === 'HEADING_2' || ns === 'HEADING_3') && typeof el.endIndex === 'number') {
+      headings.push({ start: start, end: el.endIndex - 1 });
     }
   }
   if (end <= 1) { Logger.log(`空のドキュメント: ${docId}`); return; }
