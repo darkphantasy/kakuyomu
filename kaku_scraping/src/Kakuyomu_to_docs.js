@@ -498,15 +498,17 @@ function updateIndexSpreadsheet() {
 
   // 最大ファイル数ぶん列を伸ばす（上限なし）
   const maxDocs = records.reduce((m, r) => Math.max(m, (r.docIds || []).length), 1);
-  const headers = ['作品タイトル', '話数', 'ファイル数', '最終更新', '元URL'];
+  const headers = ['短縮作品名', '作品タイトル', '話数', 'ファイル数', '最終更新', '元URL'];
   for (let i = 1; i <= maxDocs; i++) headers.push(`ファイル${i}`);
   const totalCols = headers.length;
 
   const rows = [headers];
   records.forEach(r => {
     const docIds = r.docIds || [];
+    const title  = r.title || '(無題)';
     const row = [
-      r.title || '(無題)',
+      shortenTitleForFileName_(title), // 表示専用。正タイトルは次列にそのまま残す
+      title,
       (r.total != null ? r.total : ''),
       docIds.length,
       r.updatedAt || '',
@@ -545,12 +547,13 @@ function updateIndexSpreadsheet() {
   sheet.getRange(1, 1, rows.length, totalCols).createFilter();
 
   // 列幅
-  sheet.setColumnWidth(1, 340);
-  sheet.setColumnWidth(2, 64);
-  sheet.setColumnWidth(3, 84);
-  sheet.setColumnWidth(4, 150);
-  sheet.setColumnWidth(5, 70);
-  for (let i = 6; i <= totalCols; i++) sheet.setColumnWidth(i, 72);
+  sheet.setColumnWidth(1, 200); // 短縮作品名
+  sheet.setColumnWidth(2, 340); // 作品タイトル
+  sheet.setColumnWidth(3, 64);  // 話数
+  sheet.setColumnWidth(4, 84);  // ファイル数
+  sheet.setColumnWidth(5, 150); // 最終更新
+  sheet.setColumnWidth(6, 70);  // 元URL
+  for (let i = 7; i <= totalCols; i++) sheet.setColumnWidth(i, 72);
 
   Logger.log(`索引スプレッドシートを更新: ${records.length} 作品 → ${ss.getUrl()}`);
 }
@@ -597,16 +600,17 @@ function findIndexSheet_() {
 
 // 索引シートの1行をパースする（列: 0:タイトル 1:話数 2:ファイル数 3:最終更新 4:元URL 5..:ファイル）。
 //   無効な行（タイトル/URL/作品ID のいずれかが取れない）なら null。
+// 列: 0:短縮作品名(表示専用・記録には使わない) 1:作品タイトル 2:話数 3:ファイル数 4:最終更新 5:元URL 6..:ファイル
 function parseIndexSheetRow_(values, formulas, r) {
-  const title = values[r][0];
+  const title = values[r][1];
   if (!title) return null;
-  const url = extractHyperlinkUrl(formulas[r][4]) || String(values[r][4] || '');
+  const url = extractHyperlinkUrl(formulas[r][5]) || String(values[r][5] || '');
   if (!url) return null;
   const workId = extractWorkId(url);
   if (!workId) return null;
 
   const docIds = [];
-  for (let c = 5; c < values[r].length; c++) {
+  for (let c = 6; c < values[r].length; c++) {
     const link = extractHyperlinkUrl(formulas[r][c]);
     if (link) {
       const m = link.match(/document\/d\/([a-zA-Z0-9_-]+)/);
@@ -615,7 +619,7 @@ function parseIndexSheetRow_(values, formulas, r) {
   }
   return {
     workId: workId, title: String(title), url: url, docIds: docIds,
-    total: Number(values[r][1]) || 0, updatedAt: String(values[r][3] || ''),
+    total: Number(values[r][2]) || 0, updatedAt: String(values[r][4] || ''),
   };
 }
 
