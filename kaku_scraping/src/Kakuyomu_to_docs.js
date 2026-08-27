@@ -59,6 +59,8 @@ const PHASE_DONE     = 'DONE';
 const INDEX_SHEET_NAME     = '【索引】カクヨム取得作品（表）';
 const INDEX_SHEET_TAB_NAME = '索引'; // 索引スプレッドシート内のシート（タブ）名
 
+const SHORT_FILENAME_MAX_LEN = 30; // ファイル名短縮：これを超えたら読点区切り or 強制トリミング
+
 // 操作パネル関連の定数・関数は ControlPanel.js に分離（同一プロジェクト内で共有スコープ）
 
 // runの途中経過に使うプロパティキー（完了時にこれだけ消す。記録・索引IDは残す）
@@ -1195,11 +1197,48 @@ function insertFooterIntoDoc(docId, cursor, footer) {
 
 // 新規ドキュメントをフォルダ内に作成し、1行目（タイトル＝見出し2）を入れる。
 //   返り値: { docId, cursor }（cursor は次の挿入位置）
+// ファイル名短縮が有効か（Script Property 'SHORT_FILENAME'。未設定時はデフォルトON）
+function isShortFilenameEnabled_() {
+  return PropertiesService.getScriptProperties().getProperty('SHORT_FILENAME') !== '0';
+}
+
+// ==========================================
+// タイトルをDriveのファイル名用に短縮する（ルールベース。AIは使わない）。
+//   ドキュメント本文の見出し・RESUME記録・索引シート・フッターには使わず、
+//   Docs.Documents.create() に渡すファイル名にのみ使う。
+//   1. 「本題 〜サブタイトル〜」形式のサブタイトル部分を除去
+//      （〜=U+301C波ダッシュ／～=U+FF5E全角チルダの両方に対応。表記揺れがある）
+//   2. 【】［］（）で囲まれた注記（書籍化情報等）を除去
+//      ※ 文中の強調カッコも区別なく除去するため、まれに文が不自然になる（許容）
+//   3. なお長い場合は最初の読点までを採用。読点も無ければ機械的に切って「…」を付与
+//   ※ 読点区切り・機械的トリミングの結果、文が接続助詞等で終わり不自然になる、
+//     または短くなりすぎて他作品と紛らわしくなるケースが稀にある（既知の制約）。
+// ==========================================
+function shortenTitleForFileName_(title) {
+  let s = title;
+  s = s.replace(/[　\s]*[〜～~].*[〜～~][　\s]*$/u, '');
+  s = s.replace(/[【［\[（(][^】］\]）)]*[】］\]）)]/gu, '');
+  s = s.trim();
+
+  if (s.length > SHORT_FILENAME_MAX_LEN) {
+    const idx = s.indexOf('、');
+    s = (idx > 0 && idx <= SHORT_FILENAME_MAX_LEN)
+      ? s.substring(0, idx)
+      : s.substring(0, SHORT_FILENAME_MAX_LEN) + '…';
+  }
+  return s || title; // 万一空になったら元のタイトルにフォールバック
+}
+
 function createBuildDoc(title, docPart, contLabel) {
+  // 本文見出し・記録には常に正タイトルを使う。Driveのファイル名にのみ短縮版を使う。
   const base = `${title}${contLabel}`;
   const name = docPart > 0 ? `${base}（${docPart + 1}）` : base;
 
-  const created = Docs.Documents.create({ title: name });
+  const fileTitle = isShortFilenameEnabled_() ? shortenTitleForFileName_(title) : title;
+  const fileBase  = `${fileTitle}${contLabel}`;
+  const fileName  = docPart > 0 ? `${fileBase}（${docPart + 1}）` : fileBase;
+
+  const created = Docs.Documents.create({ title: fileName });
   const docId   = created.documentId;
   try {
     DriveApp.getFileById(docId).moveTo(DriveApp.getFolderById(getTargetFolderId()));

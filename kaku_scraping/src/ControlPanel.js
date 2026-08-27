@@ -89,6 +89,8 @@ function onPanelOpen(e) {
     .addItem('進捗・順番待ちを確認', 'panelRunCheckProgress')
     .addItem('順番待ちをクリア', 'panelRunClearQueue')
     .addItem('索引を再生成', 'panelRunRebuildIndex')
+    .addSeparator()
+    .addItem('ファイル名短縮: ON/OFF切り替え', 'panelRunToggleShortFilename')
     .addToUi();
 }
 
@@ -268,5 +270,16 @@ function panelRunRebuildIndex() {
   try {
     rebuildIndex();
     writePanelStatus_('索引を再生成しました。');
+  } catch(e) { writePanelStatus_('エラー: ' + e); }
+}
+
+// ファイル名短縮（新規ドキュメント作成時、Driveのファイル名にのみ適用）のON/OFFを切り替える。
+//   本文見出し・記録・索引には影響しない。デフォルトはON（プロパティ未設定=ON）。
+function panelRunToggleShortFilename() {
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const next  = isShortFilenameEnabled_() ? '0' : '1';
+    props.setProperty('SHORT_FILENAME', next);
+    writePanelStatus_(`ファイル名短縮を${next === '1' ? 'ON' : 'OFF'}にしました。次に作成される新規ドキュメントから反映されます。`);
   } catch(e) { writePanelStatus_('エラー: ' + e); }
 }

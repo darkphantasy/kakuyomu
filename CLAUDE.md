@@ -38,6 +38,8 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 - **索引**: スプレッドシートのみ(Doc 版索引は削除済み)。`updateIndexSpreadsheet` が全記録から再生成。1 作品 1 行、列は「タイトル/話数/ファイル数/最終更新/元URL/ファイル1..N」(N は最大分冊数に合わせ可変、リンクは `=HYPERLINK()`)。ID は `INDEX_SHEET_ID` プロパティに保持。シート内のタブ名は `INDEX_SHEET_TAB_NAME`(='索引')固定。索引シートを開く処理は `findOrLocateSpreadsheet_(propKey, fileName)` に共通化(`findIndexSheet_` はこのラッパー)。
 - **操作パネル**: 索引とは別のスプレッドシート(`CONTROL_PANEL_FILE_NAME`、同じ保存先フォルダに作成)。`setupControlPanel` で作成し、そのファイルに installable な onOpen トリガー(`onPanelOpen`)を登録する。パネルを開くとカスタムメニュー「カクヨム操作」が出る。**実行は必ずメニュークリックのみ**(誤操作防止のため onEdit/チェックボックスは使わない)。パラメータはセル(`PANEL_CELL_*`)から読み取り、各 `panelRunXxx` ハンドラが対応する関数(`startFetch`/`startContinuation`/`seedResumeRecord`/`clearResumeRecord`/`syncResumeRecordsFromSheet`/`rebuildIndex`)を呼び、結果をステータスセル(`PANEL_CELL_STATUS`)に書き戻す(`writePanelStatus_`)。多段実行(`startFetch`/`startContinuation`/`startContinuationAll`)は開始時点のメッセージのみ即時反映し、真の完了は `finishRun` の `PHASE_DONE` セット時に `writePanelStatus_` で改めて通知する。パネル未作成時、`writePanelStatus_` は何もしない(呼び出し元を壊さない)。
 
+- **ファイル名短縮**: `createBuildDoc` が新規ドキュメントを作る際、Driveの**ファイル名にのみ**短縮タイトル(`shortenTitleForFileName_`)を使う。**本文のHEADING_2見出し・`RESUME_`記録・索引シート・フッターは常に正タイトル**(引数 `title` そのまま)。ルールベース(AI不使用): ①「本題 〜サブタイトル〜」形式のサブタイトルを除去(`〜`=U+301C波ダッシュ/`～`=U+FF5E全角チルダの表記揺れに両対応。**似た文字だが別コードポイントなので注意**)、②`【】［］（）`で囲まれた注記を除去(文中強調のカッコも区別なく消えるため稀に不自然になるが許容)、③なお `SHORT_FILENAME_MAX_LEN=30` 文字超なら読点区切り、無ければ機械的トリミング+「…」。既知の制約: 読点区切りの結果が接続助詞等で終わり不自然になる場合や、本題部分が短すぎて一意性を欠く場合がある(実データ22件で評価済み・許容の上で採用)。ON/OFFは Script Property `SHORT_FILENAME`(操作パネルの「ファイル名短縮: ON/OFF切り替え」から切替可、デフォルトON)。
+
 ## データモデル(Script Properties)
 
 - `RUN_STATE_KEYS` に列挙されたキー … 実行中の一時状態。`clearRunState` で消える。
@@ -45,6 +47,7 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 - `BATCH_MODE` / `BATCH_QUEUE` … 取得の順番待ちキュー(RUN_STATE_KEYS 外＝作品完了で消えない)。要素は `{url,mode,startEpisode?,endEpisode?}`(旧形式の workId 文字列も受理)。一括続き取得だけでなく、実行中に投げられた単発の取得もここに積まれる。
 - `INDEX_SHEET_ID` … 索引スプレッドシートの ID。
 - `CONTROL_PANEL_SHEET_ID` … 操作パネルスプレッドシートの ID。
+- `SHORT_FILENAME` … Driveのファイル名短縮のON/OFF(`'0'`でOFF、未設定含めそれ以外はON＝デフォルトON)。
 
 ## 書式仕様(現行)
 
