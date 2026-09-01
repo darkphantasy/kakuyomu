@@ -8,7 +8,9 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 
 - `kaku_scraping/src/Kakuyomu_to_docs.js` … 本体。取得・整形パイプライン、続き取得、索引管理
 - `kaku_scraping/src/ControlPanel.js` … 操作パネル(別スプレッドシート)関連。GAS は同一プロジェクト内の複数ファイルを1つのグローバルスコープとして実行するため import/export は不要で、`Kakuyomu_to_docs.js` 側の関数・定数をそのまま参照できる。逆に `finishRun`(`Kakuyomu_to_docs.js`)は完了通知のため `writePanelStatus_` を直接呼んでおり、コア側からこのファイルへの依存が一部ある
-- `kaku_scraping/src/appsscript.json` … マニフェスト(Docs API 有効化・OAuthスコープ)
+- `kaku_scraping/src/WebApp.js` … Web アプリ(取得インターフェース)。`doGet` と、クライアントから `google.script.run` で呼ばれる `web*` 関数群
+- `kaku_scraping/src/index.html` … Web UI 本体(単一ファイル。CSS/JS 込み)。`.claspignore` は `!*.html` を許可済みなので clasp で同期される
+- `kaku_scraping/src/appsscript.json` … マニフェスト(Docs API 有効化・OAuthスコープ・`webapp` 設定)
 - `kaku_scraping/src/Reformat_existing_docs.js` … 独立ツール。既存ドキュメントに現在の書式だけを再適用する
 
 ## 実行環境と制約(最重要)
@@ -39,6 +41,13 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 - **操作パネル**: 索引とは別のスプレッドシート(`CONTROL_PANEL_FILE_NAME`、同じ保存先フォルダに作成)。`setupControlPanel` で作成し、そのファイルに installable な onOpen トリガー(`onPanelOpen`)を登録する。パネルを開くとカスタムメニュー「カクヨム操作」が出る。**実行は必ずメニュークリックのみ**(誤操作防止のため onEdit/チェックボックスは使わない)。パラメータはセル(`PANEL_CELL_*`)から読み取り、各 `panelRunXxx` ハンドラが対応する関数(`startFetch`/`startContinuation`/`seedResumeRecord`/`clearResumeRecord`/`syncResumeRecordsFromSheet`/`rebuildIndex`)を呼び、結果をステータスセル(`PANEL_CELL_STATUS`)に書き戻す(`writePanelStatus_`)。多段実行(`startFetch`/`startContinuation`/`startContinuationAll`)は開始時点のメッセージのみ即時反映し、真の完了は `finishRun` の `PHASE_DONE` セット時に `writePanelStatus_` で改めて通知する。パネル未作成時、`writePanelStatus_` は何もしない(呼び出し元を壊さない)。
 
 - **ファイル名短縮**: `createBuildDoc` が新規ドキュメントを作る際、Driveの**ファイル名にのみ**短縮タイトル(`shortenTitleForFileName_`)を使う。**本文のHEADING_2見出し・`RESUME_`記録・索引シート・フッターは常に正タイトル**(引数 `title` そのまま)。ルールベース(AI不使用): ①「本題 〜サブタイトル〜」形式のサブタイトルを除去(`〜`=U+301C波ダッシュ/`～`=U+FF5E全角チルダの表記揺れに両対応。**似た文字だが別コードポイントなので注意**)、②`【】［］（）`で囲まれた注記を除去(文中強調のカッコも区別なく消えるため稀に不自然になるが許容)、③なお `SHORT_FILENAME_MAX_LEN=30` 文字超なら読点区切り、無ければ機械的トリミング+「…」。既知の制約: 読点区切りの結果が接続助詞等で終わり不自然になる場合や、本題部分が短すぎて一意性を欠く場合がある(実データ22件で評価済み・許容の上で採用)。ON/OFFは Script Property `SHORT_FILENAME`(操作パネルの「ファイル名短縮: ON/OFF切り替え」から切替可、デフォルトON)。
+
+- **Web アプリ(取得インターフェース)**: `doGet` が `index.html` を返し、クライアントから `google.script.run` で `WebApp.js` の `web*` 関数を呼ぶ。**取得ロジック本体には手を入れず**、既存部品(`isRunActive_`/`enqueueWork_`/`prepareFetch`/`prepareContinuation`/`batchStartNext`/`ensureTriggerAfter`)の組み合わせで実装している。要点:
+  - **即応起動**: `startFetch` 系は最初の5分ぶんを同一実行枠で走らせるため Web からはボタンが待たされる。そこで web 側は「run 状態をセット → `ensureTriggerAfter(WEB_KICKOFF_DELAY_MS)` で短い遅延のトリガーを張る」だけにして即座に返し、実処理はトリガー実行に任せる(`ensureTriggerAfter` は引数省略時 `RETRIGGER_DELAY_MS` で従来通り)。**GAS のトリガー発火には揺れがあるため、実際の開始は最大1分前後遅れることがある**。
+  - **デプロイの落とし穴**: `deploy.yml` は `clasp push` のみでデプロイ版数を更新しないため、**本番URL(`/exec`)は古いコードのまま**になる。テストデプロイの **`/dev` URL は常に最新コード**で動くので、この運用では `/dev` を使う前提。`/exec` を使うならワークフローに `clasp deploy` の追加が必要。
+  - マニフェストの `webapp`(`executeAs: USER_DEPLOYING` / `access: MYSELF`)は**スコープ追加ではないので再認可は不要**。`HtmlService` 自体も追加スコープ不要。
+  - 一覧は行ごとに「続き取得」「削除」ボタンを持つ。作品タイトルは外部由来のため、クライアント側では必ず `textContent` で描画する(`innerHTML` に流し込まない)。
+  - 操作パネル(`ControlPanel.js`)とは併存可能。同じコア関数を呼ぶだけなので二重管理にはならない。
 
 ## データモデル(Script Properties)
 
@@ -78,6 +87,6 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 ## 既知の注意・保留事項
 
 - ルビ(振り仮名)は現在の抽出(`stripHtmlTags` 系)で失われている可能性が高い。保持する場合は括弧併記等の折衷が必要(未着手・保留)。
-- 実行時 URL 入力(Script Property `KAKUYOMU_URL` 直書きの代替: WebApp の doGet フォーム等)は提案済みだが保留。
+- 実行時 URL 入力の代替(`KAKUYOMU_URL` 直書きをやめる件)は、操作パネルと Web アプリで解消済み。`KAKUYOMU_URL` 定数は引数省略時のフォールバックとしてのみ残っている。
 - 縦書き HTML 出力(Noto Serif JP)の構想が過去にあった(Docs 出力とは別系統)。
 - `INDEX_DOC_ID` プロパティは旧 Doc 索引の残骸(無害・参照なし)。

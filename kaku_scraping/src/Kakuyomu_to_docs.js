@@ -1605,17 +1605,22 @@ function stripHtmlTags(html) {
 // ==========================================
 // トリガー管理（処理完了後に単発登録）
 // ==========================================
-function ensureTriggerAfter() {
+//   delayMs 省略時は RETRIGGER_DELAY_MS。Web UI からの起動時のみ短い値を渡して
+//   「ボタンは即座に返し、実処理はトリガーに任せる」形にする。
+//   ※ GAS のトリガー発火には揺れがあるため、短く指定しても最大1分前後遅れることがある。
+function ensureTriggerAfter(delayMs) {
+  const delay = (typeof delayMs === 'number' && delayMs > 0) ? delayMs : RETRIGGER_DELAY_MS;
+
   ScriptApp.getProjectTriggers()
     .filter(t => t.getHandlerFunction() === 'continuesFetch')
     .forEach(t => ScriptApp.deleteTrigger(t));
 
   ScriptApp.newTrigger('continuesFetch')
     .timeBased()
-    .after(RETRIGGER_DELAY_MS)
+    .after(delay)
     .create();
 
-  Logger.log(`トリガー登録完了（約 ${Math.round(RETRIGGER_DELAY_MS / 1000)} 秒後に実行）`);
+  Logger.log(`トリガー登録完了（約 ${Math.round(delay / 1000)} 秒後に実行）`);
 }
 
 function deleteTrigger() {
