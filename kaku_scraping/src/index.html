@@ -56,6 +56,11 @@
       table { width: 100%; border-collapse: collapse; margin-top: 10px; }
       th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
       th { font-size: 12px; color: var(--muted); font-weight: 600; white-space: nowrap; }
+      th.sortable { cursor: pointer; user-select: none; }
+      th.sortable:hover { color: var(--accent); }
+      th .ind { font-size: 10px; }
+      .filter-row { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+      .filter-row input { flex: 1; }
       td.num, th.num { text-align: right; white-space: nowrap; }
       .title-short { font-weight: 600; }
       .title-full { font-size: 11px; color: var(--muted); word-break: break-all; }
@@ -117,19 +122,23 @@
           <button onclick="doSync()">索引と差分同期</button>
           <button onclick="doRebuild()">索引を再生成</button>
         </div>
+        <div class="filter-row">
+          <input type="text" id="filter" placeholder="作品名で絞り込み" oninput="renderTable()">
+          <button class="mini" onclick="clearFilter()">クリア</button>
+        </div>
         <table>
           <thead>
             <tr>
-              <th>作品</th>
-              <th class="num">話数</th>
-              <th class="hide-sp">最終更新</th>
+              <th class="sortable" data-key="title">作品 <span class="ind"></span></th>
+              <th class="sortable num" data-key="total">話数 <span class="ind"></span></th>
+              <th class="sortable hide-sp" data-key="updatedAt">最終更新 <span class="ind"></span></th>
               <th class="hide-sp">ドキュメント</th>
               <th>操作</th>
             </tr>
           </thead>
           <tbody id="works"></tbody>
         </table>
-        <div id="worksEmpty" class="empty" style="display:none">記録がありません。</div>
+        <div id="worksEmpty" class="empty" style="display:none"></div>
       </div>
 
       <div class="card">
@@ -150,6 +159,8 @@
     <script>
       var busy = false;
       var timer = null;
+      var lastState = null;                                      // 直近に取得した状態
+      var view = { sortKey: 'updatedAt', sortDir: 'desc' };       // 一覧の並び替え設定
 
       function $(id) { return document.getElementById(id); }
 
@@ -195,6 +206,8 @@
       }
 
       function render(s) {
+        lastState = s;
+
         var r = s.running;
         $('dot').className = 'dot' + (r.active ? ' on' : '');
         if (!r.active) {
@@ -207,13 +220,64 @@
         }
         $('queueText').textContent = s.queueCount ? ('順番待ち ' + s.queueCount + ' 件') : '順番待ちなし';
         $('shortState').textContent = s.shortFilename ? 'ON' : 'OFF';
-        $('workCount').textContent = '（' + s.works.length + ' 作品）';
+
+        renderTable();
+      }
+
+      // 並び替えの比較。第1キーが同値のときはタイトル・作品IDまで見て順序を固定する
+      //   （自動更新のたびに行が入れ替わるのを防ぐ。サーバー側と同じ考え方）
+      function compareWorks(a, b) {
+        var dir = (view.sortDir === 'asc') ? 1 : -1;
+        var v = 0;
+        if (view.sortKey === 'total') {
+          v = (Number(a.total) || 0) - (Number(b.total) || 0);
+        } else if (view.sortKey === 'title') {
+          v = (a.shortTitle || '').localeCompare(b.shortTitle || '', 'ja');
+        } else {
+          v = (a.updatedAt || '').localeCompare(b.updatedAt || '');
+        }
+        if (v !== 0) return v * dir;
+
+        var t = (a.title || '').localeCompare(b.title || '', 'ja');
+        if (t !== 0) return t;
+        return (a.workId || '').localeCompare(b.workId || '');
+      }
+
+      // 一覧の描画（絞り込み・並び替えはすべてクライアント側で行い、サーバーは呼ばない）
+      function renderTable() {
+        if (!lastState) return;
+
+        var q = $('filter').value.trim().toLowerCase();
+        var list = lastState.works.filter(function (w) {
+          if (!q) return true;
+          return ((w.shortTitle || '') + ' ' + (w.title || '')).toLowerCase().indexOf(q) >= 0;
+        });
+        list.sort(compareWorks);
+
+        var total = lastState.works.length;
+        $('workCount').textContent = q
+          ? '（' + list.length + ' / ' + total + ' 作品）'
+          : '（' + total + ' 作品）';
+
+        // 並び替えインジケータ
+        var ths = document.querySelectorAll('th.sortable');
+        for (var i = 0; i < ths.length; i++) {
+          var ind = ths[i].querySelector('.ind');
+          ind.textContent = (ths[i].getAttribute('data-key') === view.sortKey)
+            ? (view.sortDir === 'asc' ? '▲' : '▼') : '';
+        }
 
         var tb = $('works');
         tb.textContent = '';
-        $('worksEmpty').style.display = s.works.length ? 'none' : 'block';
+        var empty = $('worksEmpty');
+        if (list.length) {
+          empty.style.display = 'none';
+        } else {
+          empty.style.display = 'block';
+          empty.textContent = total ? '絞り込みに一致する作品がありません。' : '記録がありません。';
+        }
 
-        s.works.forEach(function (w) {
+        list.forEach(function (w) {
           var tr = document.createElement('tr');
 
           var tdTitle = document.createElement('td');
@@ -290,6 +354,22 @@
         add(l.panelUrl, '操作パネル');
       }
 
+      // ---- 並び替え・絞り込み ----
+      function setSort(key) {
+        if (view.sortKey === key) {
+          view.sortDir = (view.sortDir === 'asc') ? 'desc' : 'asc';
+        } else {
+          view.sortKey = key;
+          view.sortDir = (key === 'title') ? 'asc' : 'desc'; // 名前は昇順、話数・日付は新しい/多い順から
+        }
+        renderTable();
+      }
+
+      function clearFilter() {
+        $('filter').value = '';
+        renderTable();
+      }
+
       // ---- 各操作 ----
       function url()     { return $('url').value.trim(); }
       function startEp() { return $('startEp').value; }
@@ -319,6 +399,13 @@
 
       // ---- 初期化・自動更新 ----
       window.addEventListener('load', function () {
+        var ths = document.querySelectorAll('th.sortable');
+        for (var i = 0; i < ths.length; i++) {
+          (function (th) {
+            th.onclick = function () { setSort(th.getAttribute('data-key')); };
+          })(ths[i]);
+        }
+
         refresh();
         google.script.run.withSuccessHandler(renderLinks).webGetLinks();
         timer = setInterval(function () { if (!busy) refresh(); }, 7000);

@@ -465,6 +465,20 @@ function seedResumeRecord(url, existingDocIds) {
 //   1作品1行。ファイルは横方向に列を伸ばして全冊リンク（上限なし）。
 //   IDは INDEX_SHEET_ID に保持して同じファイルを更新。
 // ==========================================
+
+// 一覧の並び順（最終更新の新しい順）。索引シートと Web UI で共通に使う。
+//   updatedAt は分単位（'yyyy-MM-dd HH:mm'）までしか持たないため、一括続き取得のように
+//   複数作品が同じ分に完了すると比較結果が同値になる。その場合の順序は元の配列順
+//   （= Object.keys(getProperties()) の順で、呼び出しごとに同じ保証がない）任せになり、
+//   再描画のたびに行が入れ替わって見える。タイトル・作品IDまで見て順序を一意に確定させる。
+function compareWorksForDisplay_(a, b) {
+  const byUpdated = (b.updatedAt || '').localeCompare(a.updatedAt || '');
+  if (byUpdated !== 0) return byUpdated;
+  const byTitle = (a.title || '').localeCompare(b.title || '');
+  if (byTitle !== 0) return byTitle;
+  return (a.workId || '').localeCompare(b.workId || '');
+}
+
 function updateIndexSpreadsheet() {
   const props = PropertiesService.getScriptProperties();
   const all   = props.getProperties();
@@ -472,9 +486,9 @@ function updateIndexSpreadsheet() {
 
   const records = keys.map(k => {
     let r; try { r = JSON.parse(all[k]); } catch(e) { r = {}; }
-    r._workId = k.replace('RESUME_', '');
+    r.workId = k.replace('RESUME_', '');
     return r;
-  }).sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+  }).sort(compareWorksForDisplay_);
 
   // スプレッドシートを開く or 作成
   let ss = null;

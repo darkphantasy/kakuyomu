@@ -48,7 +48,7 @@ function webGetState() {
         docIds:     r.docIds || [],
       };
     })
-    .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+    .sort(compareWorksForDisplay_); // 同分の作品が呼び出しごとに入れ替わらないよう決定的に並べる
 
   const eps   = JSON.parse(all.EPISODES || '[]');
   const queue = JSON.parse(all.BATCH_QUEUE || '[]');
