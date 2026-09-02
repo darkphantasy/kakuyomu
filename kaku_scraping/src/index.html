@@ -162,6 +162,40 @@
       var lastState = null;                                      // 直近に取得した状態
       var view = { sortKey: 'updatedAt', sortDir: 'desc' };       // 一覧の並び替え設定
 
+      // ドキュメントサイズ（参考値・目安）。7秒ポーリングとは別経路で、
+      //   「まだ知らない／サーバー側キャッシュと同じ1時間で失効したもの」だけをまとめて取りに行く。
+      var docSizes = {};          // docId -> { bytes, at }
+      var pendingSizeIds = {};    // docId -> true（問い合わせ中の重複防止）
+      var SIZE_STALE_MS = 60 * 60 * 1000; // 1時間（サーバー側キャッシュと合わせる）
+
+      function maybeFetchSizes(works) {
+        var now = Date.now();
+        var need = [];
+        works.forEach(function (w) {
+          w.docIds.forEach(function (id) {
+            if (pendingSizeIds[id]) return;
+            var known = docSizes[id];
+            if (known && (now - known.at) < SIZE_STALE_MS) return;
+            need.push(id);
+          });
+        });
+        if (need.length === 0) return;
+
+        need.forEach(function (id) { pendingSizeIds[id] = true; });
+        google.script.run
+          .withSuccessHandler(function (sizes) {
+            need.forEach(function (id) {
+              docSizes[id] = { bytes: (sizes && sizes[id]) || 0, at: Date.now() };
+              delete pendingSizeIds[id];
+            });
+            renderTable();
+          })
+          .withFailureHandler(function () {
+            need.forEach(function (id) { delete pendingSizeIds[id]; }); // 次回また試す
+          })
+          .webGetDocSizes(need);
+      }
+
       function $(id) { return document.getElementById(id); }
 
       function log(msg, isErr) {
@@ -207,6 +241,7 @@
 
       function render(s) {
         lastState = s;
+        maybeFetchSizes(s.works);
 
         var r = s.running;
         $('dot').className = 'dot' + (r.active ? ' on' : '');
@@ -301,10 +336,15 @@
           var tdDocs = document.createElement('td');
           tdDocs.className = 'docs hide-sp';
           w.docIds.forEach(function (id, i) {
+            // サイズ0（削除済み・アクセス不可）が判明しているものはリンクごと出さない。
+            // まだサイズ未取得の間はサイズ表記なしでリンクだけ出す。
+            var known = docSizes[id];
+            if (known && known.bytes === 0) return;
+
             var a = document.createElement('a');
             a.href = 'https://docs.google.com/document/d/' + id;
             a.target = '_blank';
-            a.textContent = (i + 1) + '冊目';
+            a.textContent = (i + 1) + '冊目' + (known ? ('（' + Math.round(known.bytes / 1024) + ' KB）') : '');
             tdDocs.appendChild(a);
           });
 

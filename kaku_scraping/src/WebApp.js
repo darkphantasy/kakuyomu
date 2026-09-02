@@ -18,7 +18,9 @@
 //   操作パネル（ControlPanel.js のスプレッドシート）とは併存可能。
 // ==========================================
 
-const WEB_KICKOFF_DELAY_MS = 1000; // Web UI から起動する際のトリガー遅延
+const WEB_KICKOFF_DELAY_MS = 1000;   // Web UI から起動する際のトリガー遅延
+const DOC_SIZE_CACHE_SEC   = 3600;   // ドキュメントサイズのキャッシュ保持時間（1時間）
+const DOC_SIZE_CACHE_PREFIX = 'docsize_';
 
 function doGet(e) {
   return HtmlService.createHtmlOutputFromFile('index')
@@ -201,6 +203,50 @@ function webToggleShortFilename() {
     ok: true,
     message: `ファイル名短縮を${next === '1' ? 'ON' : 'OFF'}にしました（次に作成される新規ドキュメントから反映）。`,
   };
+}
+
+// ==========================================
+// ドキュメントサイズ（バイト数）。7秒ポーリングの webGetState には含めず、
+// クライアント側が「まだサイズを知らない docId」だけをまとめて呼ぶ専用関数。
+//   進捗の目安として使うだけなので、正確な文字数との対応は保証しない。
+//   CacheService（1時間）で Drive 呼び出し自体も抑える。
+//   削除済み・アクセス不可のファイルは 0 を返す（クライアント側はこれを見てリンクを消す）。
+// ==========================================
+function webGetDocSizes(docIds) {
+  docIds = Array.isArray(docIds) ? docIds : [];
+  if (docIds.length === 0) return {};
+
+  const cache     = CacheService.getScriptCache();
+  const cacheKeys = docIds.map(id => DOC_SIZE_CACHE_PREFIX + id);
+  const cached    = cache.getAll(cacheKeys);
+
+  const result  = {};
+  const toFetch = [];
+  docIds.forEach((id, i) => {
+    const key = cacheKeys[i];
+    if (Object.prototype.hasOwnProperty.call(cached, key)) {
+      result[id] = Number(cached[key]) || 0;
+    } else {
+      toFetch.push(id);
+    }
+  });
+
+  if (toFetch.length > 0) {
+    const toCache = {};
+    toFetch.forEach(id => {
+      let bytes = 0;
+      try {
+        const f = DriveApp.getFileById(id);
+        if (!f.isTrashed()) bytes = f.getSize();
+      } catch(e) { bytes = 0; } // 削除済み・アクセス不可
+      result[id] = bytes;
+      toCache[DOC_SIZE_CACHE_PREFIX + id] = String(bytes);
+    });
+    try { cache.putAll(toCache, DOC_SIZE_CACHE_SEC); }
+    catch(e) { Logger.log('ドキュメントサイズのキャッシュ書き込み失敗: ' + e); }
+  }
+
+  return result; // { docId: バイト数（0=削除済み/取得失敗） }
 }
 
 // 索引スプレッドシート・操作パネルへのリンク（画面から開けるように）

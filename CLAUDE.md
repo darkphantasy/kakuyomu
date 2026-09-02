@@ -48,6 +48,7 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
   - マニフェストの `webapp`(`executeAs: USER_DEPLOYING` / `access: MYSELF`)は**スコープ追加ではないので再認可は不要**。`HtmlService` 自体も追加スコープ不要。
   - 一覧は行ごとに「続き取得」「削除」ボタンを持つ。作品タイトルは外部由来のため、クライアント側では必ず `textContent` で描画する(`innerHTML` に流し込まない)。
   - **並び替え・絞り込みはクライアント側だけで完結**(`renderTable` / `compareWorks`)。サーバーは呼ばないので7秒ポーリングとは独立して動く。並び替え設定は `view` に保持し、自動更新で再描画されても維持される。第1キーが同値のときはサーバー側と同じくタイトル・作品IDでタイブレークして順序を固定する(同値のたびに行が入れ替わるのを防ぐ)。話数は `total` が文字列で来るため `Number()` してから比較する(文字列比較だと "598" < "84" になる)。
+  - **ドキュメントサイズ表示**: 進捗の目安(参考値。実文字数と厳密には一致しない)。`webGetDocSizes(docIds)` は 7 秒ポーリングの `webGetState` には含めない別経路で、クライアント側 `maybeFetchSizes` が「まだ知らない、または `SIZE_STALE_MS`(1時間、サーバーの `DOC_SIZE_CACHE_SEC` と合わせてある)より古い docId」だけをまとめて問い合わせる。サーバー側も `CacheService`(`DOC_SIZE_CACHE_SEC=3600`)でDrive呼び出し自体を抑える。**サイズ0は「削除済み・アクセス不可」の意味**(`DriveApp.getFileById` の例外、または `isTrashed()`)で、その docId のリンクごと表示しない。分冊番号(`(i+1)+'冊目'`)は `docIds` 配列の位置でそのまま採番するため、途中の分冊がゴミ箱に入って表示から消えても後続の番号はズレない(=既存の `createBuildDoc` の `docPart = docIds.length` 採番と同じ考え方)。
   - 操作パネル(`ControlPanel.js`)とは併存可能。同じコア関数を呼ぶだけなので二重管理にはならない。
 
 ## データモデル(Script Properties)
