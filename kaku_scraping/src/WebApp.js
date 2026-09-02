@@ -249,6 +249,15 @@ function webGetDocSizes(docIds) {
   return result; // { docId: バイト数（0=削除済み/取得失敗） }
 }
 
+// ドキュメントへ書き込みが確定したタイミング（finishRun）で呼ぶ。
+//   このタイミングでキャッシュを消しておかないと、直後に webGetDocSizes を
+//   呼んでも書き込み前の古いサイズが返ってしまう。
+function invalidateDocSizeCache_(docIds) {
+  docIds = Array.isArray(docIds) ? docIds : [];
+  if (docIds.length === 0) return;
+  CacheService.getScriptCache().removeAll(docIds.map(id => DOC_SIZE_CACHE_PREFIX + id));
+}
+
 // 索引スプレッドシート・操作パネルへのリンク（画面から開けるように）
 function webGetLinks() {
   const props = PropertiesService.getScriptProperties();

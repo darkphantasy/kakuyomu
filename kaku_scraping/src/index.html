@@ -162,38 +162,55 @@
       var lastState = null;                                      // 直近に取得した状態
       var view = { sortKey: 'updatedAt', sortDir: 'desc' };       // 一覧の並び替え設定
 
-      // ドキュメントサイズ（参考値・目安）。7秒ポーリングとは別経路で、
-      //   「まだ知らない／サーバー側キャッシュと同じ1時間で失効したもの」だけをまとめて取りに行く。
-      var docSizes = {};          // docId -> { bytes, at }
+      // ドキュメントサイズ（参考値・目安）。7秒ポーリングとは別経路で問い合わせる。
+      //   更新するのは「ページ再読込時」と「取得が完了した直後」の2タイミングのみ。
+      //   時間経過だけでの再取得はしない（サーバー側は finishRun のタイミングで
+      //   該当ドキュメントのキャッシュを明示的に無効化しているため、この2タイミングで
+      //   問い合わせれば常に最新の値が返る）。
+      var docSizes = {};          // docId -> bytes
       var pendingSizeIds = {};    // docId -> true（問い合わせ中の重複防止）
-      var SIZE_STALE_MS = 60 * 60 * 1000; // 1時間（サーバー側キャッシュと合わせる）
+      var prevRunActive = null;   // 直前のポーリングでの実行中フラグ（完了エッジの検出用）
 
+      // まだ一度もサイズを取得していない docId だけをまとめて問い合わせる
       function maybeFetchSizes(works) {
-        var now = Date.now();
         var need = [];
         works.forEach(function (w) {
           w.docIds.forEach(function (id) {
             if (pendingSizeIds[id]) return;
-            var known = docSizes[id];
-            if (known && (now - known.at) < SIZE_STALE_MS) return;
+            if (Object.prototype.hasOwnProperty.call(docSizes, id)) return;
             need.push(id);
           });
         });
-        if (need.length === 0) return;
+        if (need.length > 0) fetchSizes(need);
+      }
 
-        need.forEach(function (id) { pendingSizeIds[id] = true; });
+      function fetchSizes(ids) {
+        ids.forEach(function (id) { pendingSizeIds[id] = true; });
         google.script.run
           .withSuccessHandler(function (sizes) {
-            need.forEach(function (id) {
-              docSizes[id] = { bytes: (sizes && sizes[id]) || 0, at: Date.now() };
+            ids.forEach(function (id) {
+              docSizes[id] = (sizes && sizes[id]) || 0;
               delete pendingSizeIds[id];
             });
             renderTable();
           })
           .withFailureHandler(function () {
-            need.forEach(function (id) { delete pendingSizeIds[id]; }); // 次回また試す
+            ids.forEach(function (id) { delete pendingSizeIds[id]; }); // 次回また試す
           })
-          .webGetDocSizes(need);
+          .webGetDocSizes(ids);
+      }
+
+      // 実行中(true) → 待機中(false) になった瞬間だけ、表示中の全ドキュメントの
+      //   サイズを取り直す（取得によって内容が変わった可能性があるため）。
+      function maybeRefetchSizesOnCompletion(s) {
+        var justFinished = (prevRunActive === true && s.running.active === false);
+        prevRunActive = s.running.active;
+        if (!justFinished) return false;
+
+        var ids = [];
+        s.works.forEach(function (w) { ids = ids.concat(w.docIds); });
+        if (ids.length > 0) fetchSizes(ids);
+        return true;
       }
 
       function $(id) { return document.getElementById(id); }
@@ -241,7 +258,9 @@
 
       function render(s) {
         lastState = s;
-        maybeFetchSizes(s.works);
+        // 取得完了の瞬間は全ドキュメントぶんまとめて取り直す。それ以外は
+        // 新しく現れた（未取得の）docId だけを取りに行く。
+        if (!maybeRefetchSizesOnCompletion(s)) maybeFetchSizes(s.works);
 
         var r = s.running;
         $('dot').className = 'dot' + (r.active ? ' on' : '');
@@ -338,13 +357,14 @@
           w.docIds.forEach(function (id, i) {
             // サイズ0（削除済み・アクセス不可）が判明しているものはリンクごと出さない。
             // まだサイズ未取得の間はサイズ表記なしでリンクだけ出す。
-            var known = docSizes[id];
-            if (known && known.bytes === 0) return;
+            var isKnown = Object.prototype.hasOwnProperty.call(docSizes, id);
+            var bytes = docSizes[id];
+            if (isKnown && bytes === 0) return;
 
             var a = document.createElement('a');
             a.href = 'https://docs.google.com/document/d/' + id;
             a.target = '_blank';
-            a.textContent = (i + 1) + '冊目' + (known ? ('（' + Math.round(known.bytes / 1024) + ' KB）') : '');
+            a.textContent = (i + 1) + '冊目' + (isKnown ? ('（' + Math.round(bytes / 1024) + ' KB）') : '');
             tdDocs.appendChild(a);
           });
 
