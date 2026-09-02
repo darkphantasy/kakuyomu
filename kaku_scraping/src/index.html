@@ -163,15 +163,22 @@
       var view = { sortKey: 'updatedAt', sortDir: 'desc' };       // 一覧の並び替え設定
 
       // ドキュメントサイズ（参考値・目安）。7秒ポーリングとは別経路で問い合わせる。
-      //   更新するのは「ページ再読込時」と「取得が完了した直後」の2タイミングのみ。
+      //   更新するのは「ページ再読込時」と「取得が完了した作品」だけ。
       //   時間経過だけでの再取得はしない（サーバー側は finishRun のタイミングで
-      //   該当ドキュメントのキャッシュを明示的に無効化しているため、この2タイミングで
-      //   問い合わせれば常に最新の値が返る）。
+      //   該当ドキュメントのキャッシュを明示的に無効化しているため、問い合わせれば
+      //   常に最新の値が返る）。
+      //
+      //   完了検知は running.active の true→false エッジでは行わない。一括続き取得は
+      //   数十分〜数時間かかることがあり、タブがバックグラウンドだとポーリングが
+      //   間引かれ、遷移の瞬間を取りこぼしてタブに戻ってきても二度と検出できなくなる。
+      //   代わりに、作品ごとの updatedAt を前回ポーリング時と比較し、**変化した作品だけ**
+      //   その場でサイズを取り直す（ポーリングが間引かれていても、次に動いた時点で
+      //   前回見た値との差分としてまとめて拾える）。
       var docSizes = {};          // docId -> bytes
       var pendingSizeIds = {};    // docId -> true（問い合わせ中の重複防止）
-      var prevRunActive = null;   // 直前のポーリングでの実行中フラグ（完了エッジの検出用）
+      var knownUpdatedAt = {};    // workId -> 前回ポーリング時点の updatedAt
 
-      // まだ一度もサイズを取得していない docId だけをまとめて問い合わせる
+      // まだ一度もサイズを取得していない docId だけをまとめて問い合わせる（主にページ読込時）
       function maybeFetchSizes(works) {
         var need = [];
         works.forEach(function (w) {
@@ -182,6 +189,24 @@
           });
         });
         if (need.length > 0) fetchSizes(need);
+      }
+
+      // 前回ポーリング時から updatedAt が変わった作品のドキュメントだけ取り直す
+      //   （1作品完了するたびに、その作品ぶんだけ更新される）
+      function refreshChangedWorkSizes(works) {
+        var changed = [];
+        var seenWorkIds = {};
+        works.forEach(function (w) {
+          seenWorkIds[w.workId] = true;
+          var prev = knownUpdatedAt[w.workId];
+          if (prev !== undefined && prev !== w.updatedAt) changed = changed.concat(w.docIds);
+          knownUpdatedAt[w.workId] = w.updatedAt;
+        });
+        // 一覧から消えた作品（削除された）の記録は掃除しておく
+        Object.keys(knownUpdatedAt).forEach(function (id) {
+          if (!seenWorkIds[id]) delete knownUpdatedAt[id];
+        });
+        if (changed.length > 0) fetchSizes(changed);
       }
 
       function fetchSizes(ids) {
@@ -198,19 +223,6 @@
             ids.forEach(function (id) { delete pendingSizeIds[id]; }); // 次回また試す
           })
           .webGetDocSizes(ids);
-      }
-
-      // 実行中(true) → 待機中(false) になった瞬間だけ、表示中の全ドキュメントの
-      //   サイズを取り直す（取得によって内容が変わった可能性があるため）。
-      function maybeRefetchSizesOnCompletion(s) {
-        var justFinished = (prevRunActive === true && s.running.active === false);
-        prevRunActive = s.running.active;
-        if (!justFinished) return false;
-
-        var ids = [];
-        s.works.forEach(function (w) { ids = ids.concat(w.docIds); });
-        if (ids.length > 0) fetchSizes(ids);
-        return true;
       }
 
       function $(id) { return document.getElementById(id); }
@@ -258,9 +270,8 @@
 
       function render(s) {
         lastState = s;
-        // 取得完了の瞬間は全ドキュメントぶんまとめて取り直す。それ以外は
-        // 新しく現れた（未取得の）docId だけを取りに行く。
-        if (!maybeRefetchSizesOnCompletion(s)) maybeFetchSizes(s.works);
+        refreshChangedWorkSizes(s.works); // 完了した（updatedAtが変わった）作品を取り直す
+        maybeFetchSizes(s.works);         // 新しく現れた（未取得の）docId も取りに行く
 
         var r = s.running;
         $('dot').className = 'dot' + (r.active ? ' on' : '');
