@@ -59,8 +59,13 @@
       th.sortable { cursor: pointer; user-select: none; }
       th.sortable:hover { color: var(--accent); }
       th .ind { font-size: 10px; }
-      .filter-row { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
-      .filter-row input { flex: 1; }
+      .filter-row { display: flex; gap: 8px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+      .filter-row input[type=text] { flex: 1; min-width: 140px; }
+      .checkbox-label {
+        display: flex; align-items: center; gap: 5px;
+        font-size: 13px; color: var(--text); white-space: nowrap; cursor: pointer;
+      }
+      .checkbox-label input { width: auto; }
       td.num, th.num { text-align: right; white-space: nowrap; }
       .title-short { font-weight: 600; }
       .title-full { font-size: 11px; color: var(--muted); word-break: break-all; }
@@ -125,6 +130,10 @@
         <div class="filter-row">
           <input type="text" id="filter" placeholder="作品名で絞り込み" oninput="renderTable()">
           <button class="mini" onclick="clearFilter()">クリア</button>
+          <label class="checkbox-label">
+            <input type="checkbox" id="unreadOnly" onchange="renderTable()">
+            未読のみ表示
+          </label>
         </div>
         <table>
           <thead>
@@ -390,14 +399,18 @@
         if (!lastState) return;
 
         var q = $('filter').value.trim().toLowerCase();
+        var unreadOnly = $('unreadOnly').checked;
         var list = lastState.works.filter(function (w) {
-          if (!q) return true;
-          return ((w.shortTitle || '') + ' ' + (w.title || '')).toLowerCase().indexOf(q) >= 0;
+          if (q && ((w.shortTitle || '') + ' ' + (w.title || '')).toLowerCase().indexOf(q) < 0) return false;
+          // 既読話数が「最新」と確定している（＝未読なし）作品を除外する。
+          // まだ判定中（未取得）の作品は、確定するまで消えたり出たりしないよう残す。
+          if (unreadOnly && readingEp[w.workId] === 'latest') return false;
+          return true;
         });
         list.sort(compareWorks);
 
         var total = lastState.works.length;
-        $('workCount').textContent = q
+        $('workCount').textContent = (q || unreadOnly)
           ? '（' + list.length + ' / ' + total + ' 作品）'
           : '（' + total + ' 作品）';
 
