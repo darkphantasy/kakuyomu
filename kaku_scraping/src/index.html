@@ -131,6 +131,7 @@
             <tr>
               <th class="sortable" data-key="title">作品 <span class="ind"></span></th>
               <th class="sortable num" data-key="total">話数 <span class="ind"></span></th>
+              <th class="sortable num" data-key="episode">既読 <span class="ind"></span></th>
               <th class="sortable hide-sp" data-key="updatedAt">最終更新 <span class="ind"></span></th>
               <th class="hide-sp">ドキュメント</th>
               <th>操作</th>
@@ -178,6 +179,14 @@
       var pendingSizeIds = {};    // docId -> true（問い合わせ中の重複防止）
       var knownUpdatedAt = {};    // workId -> 前回ポーリング時点の updatedAt
 
+      // 既読話数（サイズと同じ2つのタイミングで更新する）。
+      //   読み進めてドキュメントを削るのはこちらの操作で、取得側の updatedAt は動かない。
+      //   つまり読書ぶんの反映は「ページ再読込時」が受け持つ（サーバー側はサイズ込みの
+      //   キャッシュキーなので、中身が変わっていない作品は読みに行かずに即返る）。
+      var readingEp = {};         // workId -> 話数 or 'latest'（最新話まで既読）
+      var pendingEpIds = {};      // workId -> true
+      var PROGRESS_CHUNK = 5;     // 1回の問い合わせで見る作品数（未キャッシュだと1件ずつ読むため）
+
       // まだ一度もサイズを取得していない docId だけをまとめて問い合わせる（主にページ読込時）
       function maybeFetchSizes(works) {
         var need = [];
@@ -191,22 +200,41 @@
         if (need.length > 0) fetchSizes(need);
       }
 
-      // 前回ポーリング時から updatedAt が変わった作品のドキュメントだけ取り直す
+      // まだ既読話数を知らない作品だけを問い合わせる（主にページ読込時）
+      function maybeFetchProgress(works) {
+        var need = [];
+        works.forEach(function (w) {
+          if (pendingEpIds[w.workId]) return;
+          if (Object.prototype.hasOwnProperty.call(readingEp, w.workId)) return;
+          need.push(w);
+        });
+        fetchProgress(need);
+      }
+
+      // 前回ポーリング時から updatedAt が変わった作品だけ、サイズと既読話数を取り直す
       //   （1作品完了するたびに、その作品ぶんだけ更新される）
-      function refreshChangedWorkSizes(works) {
-        var changed = [];
+      function refreshChangedWorks(works) {
+        var changedDocIds = [];
+        var changedWorks = [];
         var seenWorkIds = {};
         works.forEach(function (w) {
           seenWorkIds[w.workId] = true;
           var prev = knownUpdatedAt[w.workId];
-          if (prev !== undefined && prev !== w.updatedAt) changed = changed.concat(w.docIds);
+          if (prev !== undefined && prev !== w.updatedAt) {
+            changedDocIds = changedDocIds.concat(w.docIds);
+            changedWorks.push(w);
+          }
           knownUpdatedAt[w.workId] = w.updatedAt;
         });
         // 一覧から消えた作品（削除された）の記録は掃除しておく
         Object.keys(knownUpdatedAt).forEach(function (id) {
           if (!seenWorkIds[id]) delete knownUpdatedAt[id];
         });
-        if (changed.length > 0) fetchSizes(changed);
+        Object.keys(readingEp).forEach(function (id) {
+          if (!seenWorkIds[id]) delete readingEp[id];
+        });
+        if (changedDocIds.length > 0) fetchSizes(changedDocIds);
+        fetchProgress(changedWorks);
       }
 
       function fetchSizes(ids) {
@@ -223,6 +251,52 @@
             ids.forEach(function (id) { delete pendingSizeIds[id]; }); // 次回また試す
           })
           .webGetDocSizes(ids);
+      }
+
+      function fetchProgress(works) {
+        // 未キャッシュの作品はドキュメントの先頭を実際に読みに行くので、1回の呼び出しが
+        // 長くなりすぎないよう小分けにする（結果も届いたぶんから順に描画される）
+        for (var i = 0; i < works.length; i += PROGRESS_CHUNK) {
+          fetchProgressChunk(works.slice(i, i + PROGRESS_CHUNK));
+        }
+      }
+
+      function fetchProgressChunk(works) {
+        if (works.length === 0) return;
+        var map = {};
+        var ids = [];
+        works.forEach(function (w) {
+          map[w.workId] = w.docIds;
+          ids.push(w.workId);
+          pendingEpIds[w.workId] = true;
+        });
+        google.script.run
+          .withSuccessHandler(function (res) {
+            ids.forEach(function (id) {
+              delete pendingEpIds[id];
+              // 判定できなかった作品はキーごと返ってこない（未取得のままにして次回また試す）
+              if (res && Object.prototype.hasOwnProperty.call(res, id)) readingEp[id] = res[id];
+            });
+            renderTable();
+          })
+          .withFailureHandler(function () {
+            ids.forEach(function (id) { delete pendingEpIds[id]; }); // 次回また試す
+          })
+          .webGetReadingProgress(map);
+      }
+
+      // 一覧に出す既読話数の表示（未取得のうちは「…」）
+      function episodeLabel(w) {
+        if (!Object.prototype.hasOwnProperty.call(readingEp, w.workId)) return '…';
+        var ep = readingEp[w.workId];
+        return (ep === 'latest') ? '最新' : (ep + '話');
+      }
+
+      // 並び替え用の数値。最新話まで既読＝全話読了とみなし話数を使う。未取得は末尾に寄せる。
+      function episodeValue(w) {
+        if (!Object.prototype.hasOwnProperty.call(readingEp, w.workId)) return -1;
+        var ep = readingEp[w.workId];
+        return (ep === 'latest') ? (Number(w.total) || 0) : (Number(ep) || 0);
       }
 
       function $(id) { return document.getElementById(id); }
@@ -270,8 +344,9 @@
 
       function render(s) {
         lastState = s;
-        refreshChangedWorkSizes(s.works); // 完了した（updatedAtが変わった）作品を取り直す
-        maybeFetchSizes(s.works);         // 新しく現れた（未取得の）docId も取りに行く
+        refreshChangedWorks(s.works);  // 完了した（updatedAtが変わった）作品を取り直す
+        maybeFetchSizes(s.works);      // 新しく現れた（未取得の）docId も取りに行く
+        maybeFetchProgress(s.works);   // 既読話数を知らない作品も取りに行く
 
         var r = s.running;
         $('dot').className = 'dot' + (r.active ? ' on' : '');
@@ -296,6 +371,8 @@
         var v = 0;
         if (view.sortKey === 'total') {
           v = (Number(a.total) || 0) - (Number(b.total) || 0);
+        } else if (view.sortKey === 'episode') {
+          v = episodeValue(a) - episodeValue(b);
         } else if (view.sortKey === 'title') {
           v = (a.shortTitle || '').localeCompare(b.shortTitle || '', 'ja');
         } else {
@@ -359,6 +436,10 @@
           tdTotal.className = 'num';
           tdTotal.textContent = w.total;
 
+          var tdEp = document.createElement('td');
+          tdEp.className = 'num';
+          tdEp.textContent = episodeLabel(w);
+
           var tdUpd = document.createElement('td');
           tdUpd.className = 'hide-sp';
           tdUpd.textContent = w.updatedAt;
@@ -404,6 +485,7 @@
 
           tr.appendChild(tdTitle);
           tr.appendChild(tdTotal);
+          tr.appendChild(tdEp);
           tr.appendChild(tdUpd);
           tr.appendChild(tdDocs);
           tr.appendChild(tdAct);

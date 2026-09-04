@@ -22,6 +22,15 @@ const WEB_KICKOFF_DELAY_MS = 1000;   // Web UI から起動する際のトリガ
 const DOC_SIZE_CACHE_SEC   = 3600;   // ドキュメントサイズのキャッシュ保持時間（1時間）
 const DOC_SIZE_CACHE_PREFIX = 'docsize_';
 
+// 既読話数の判定（読了ぶんを先頭から削除する運用が前提。後述の webGetReadingProgress）
+const PROGRESS_SCAN_CHARS   = 20000;                    // ドキュメント先頭から何字ぶんを見るか
+const PROGRESS_SCAN_BYTES   = PROGRESS_SCAN_CHARS * 3;  // UTF-8 の日本語は1字3バイト
+const PROGRESS_CACHE_SEC    = 21600;                    // CacheService の上限（6時間）
+const PROGRESS_CACHE_PREFIX = 'progress_';
+const PROGRESS_LATEST       = 'latest';                 // 「最新話まで既読」を表す返り値
+// 見出しは「<話タイトル> [NNN]」という1行。行末に寄せて本文中の [123] を拾わないようにする。
+const EPISODE_TAG_RE        = /^.*\[(\d{3,})\]\s*$/m;
+
 function doGet(e) {
   return HtmlService.createHtmlOutputFromFile('index')
     .setTitle('カクヨム取得コンソール')
@@ -256,6 +265,109 @@ function invalidateDocSizeCache_(docIds) {
   docIds = Array.isArray(docIds) ? docIds : [];
   if (docIds.length === 0) return;
   CacheService.getScriptCache().removeAll(docIds.map(id => DOC_SIZE_CACHE_PREFIX + id));
+}
+
+// ==========================================
+// 既読話数（今どこまで読んだか）
+//   読了したぶんをドキュメント先頭から削除していく運用なので、「先頭に残っている
+//   最初の [NNN]」が今読んでいる話にあたる。1話は概ね2000〜5000字なので、先頭
+//   PROGRESS_SCAN_CHARS 字だけ見れば足りる（全文を読む必要はない）。
+//
+//   引数: { workId: [docId, ...]（古い順） }
+//   返り値: { workId: 話数 or PROGRESS_LATEST }。判定できなかった作品はキーごと返さない
+//           （クライアント側は「未取得」として扱い、次回また問い合わせる）。
+// ==========================================
+function webGetReadingProgress(workDocIds) {
+  const result = {};
+  if (!workDocIds) return result;
+
+  const cache = CacheService.getScriptCache();
+  Object.keys(workDocIds).forEach(workId => {
+    const docIds = Array.isArray(workDocIds[workId]) ? workDocIds[workId] : [];
+    if (docIds.length === 0) return; // ドキュメントが無い作品は判定しない
+
+    let value = PROGRESS_LATEST; // どの分冊にも見出しが残っていなければ「最新話まで既読」
+    for (let i = 0; i < docIds.length; i++) {
+      const found = findFirstEpisodeNo_(cache, docIds[i]);
+      if (found.status === 'error') return;                   // 判定不能：この作品は返さない
+      if (found.status === 'found') { value = found.episode; break; }
+      // 'skip'（削除済み）と 'none'（見出しが残っていない＝読了）はどちらも次の分冊へ
+    }
+    result[workId] = value;
+  });
+
+  return result;
+}
+
+// 1つのドキュメントについて、先頭に残っている最初の話数を返す。
+//   { status: 'found', episode } / 'none'（見出し無し） / 'skip'（削除済み） / 'error'
+//
+//   キャッシュキーにファイルサイズを含めているのがポイント。サイズが変わっていなければ
+//   中身も変わっていないので走査結果をそのまま使い回せる（＝読み進めてもいない、
+//   追記もされていないドキュメントは二度と読みに行かない）。逆にサイズが変われば
+//   キーごと変わるので、明示的なキャッシュ無効化は不要。
+function findFirstEpisodeNo_(cache, docId) {
+  let size;
+  try {
+    const f = DriveApp.getFileById(docId);
+    if (f.isTrashed()) return { status: 'skip' };
+    size = f.getSize();
+  } catch(e) {
+    return { status: 'skip' }; // 削除済み・アクセス不可
+  }
+
+  const key    = `${PROGRESS_CACHE_PREFIX}${docId}_${size}`;
+  const cached = cache.get(key);
+  if (cached != null) {
+    return (cached === '') ? { status: 'none' } : { status: 'found', episode: Number(cached) };
+  }
+
+  const head = fetchDocHeadText_(docId);
+  if (head == null) return { status: 'error' };
+
+  const m = head.match(EPISODE_TAG_RE);
+  try { cache.put(key, m ? m[1] : '', PROGRESS_CACHE_SEC); }
+  catch(e) { Logger.log('既読話数のキャッシュ書き込み失敗: ' + e); }
+
+  return m ? { status: 'found', episode: Number(m[1]) } : { status: 'none' };
+}
+
+// ドキュメント本文の「先頭だけ」をプレーンテキストで取る。
+//   GAS には受信を途中で打ち切る手段が無く（ストリーミング不可）、Docs API の
+//   documents.get にも範囲指定が無いため、転送量を削る手は HTTP の Range だけ。
+//   206 が返れば先頭ぶんだけで済む。Range が無視されて 200（全文）が返る可能性も
+//   あるので、その場合は受信後に先頭を切り出して使い、ログに残しておく。
+//   ※ Docs API で本文を含む取得をすると要素ごとにオブジェクトが大量生成されて
+//     OOM するため、そちらの経路は使わない（テキストは単一の文字列で受け取る）。
+function fetchDocHeadText_(docId) {
+  const url = `https://www.googleapis.com/drive/v3/files/${docId}/export?mimeType=text/plain`;
+  let res;
+  try {
+    res = UrlFetchApp.fetch(url, {
+      headers: {
+        'Authorization': `Bearer ${ScriptApp.getOAuthToken()}`,
+        'Range':         `bytes=0-${PROGRESS_SCAN_BYTES - 1}`,
+      },
+      muteHttpExceptions: true,
+    });
+  } catch(e) {
+    Logger.log(`本文先頭の取得に失敗: ${docId} / ${e}`);
+    return null;
+  }
+
+  const code = res.getResponseCode();
+  if (code !== 200 && code !== 206) {
+    Logger.log(`本文先頭の取得に失敗: HTTP ${code} (${docId})`);
+    return null;
+  }
+  if (code === 200) {
+    Logger.log(`Range 未対応（HTTP 200）: 全文を受信し先頭 ${PROGRESS_SCAN_CHARS} 字のみ使用 (${docId})`);
+  }
+
+  // Range でバイト境界を切った場合、末尾の1文字が壊れることがあるが、
+  // 探すのは半角の [NNN] なので影響しない。
+  const text = res.getContentText('UTF-8');
+  return (text.length > PROGRESS_SCAN_CHARS) ? text.substring(0, PROGRESS_SCAN_CHARS) : text;
 }
 
 // 索引スプレッドシート・操作パネルへのリンク（画面から開けるように）
