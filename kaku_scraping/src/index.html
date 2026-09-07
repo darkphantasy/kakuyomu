@@ -169,10 +169,12 @@
     <script>
       var busy = false;
       var timer = null;
+      var POLL_ACTIVE_MS = 7000;   // 実行中のポーリング間隔
+      var POLL_IDLE_MS   = 30000;  // 待機中のポーリング間隔（状態が変わらないので間隔を落とす）
       var lastState = null;                                      // 直近に取得した状態
       var view = { sortKey: 'updatedAt', sortDir: 'desc' };       // 一覧の並び替え設定
 
-      // ドキュメントサイズ（参考値・目安）。7秒ポーリングとは別経路で問い合わせる。
+      // ドキュメントサイズ（参考値・目安）。定期ポーリングとは別経路で問い合わせる。
       //   更新するのは「ページ再読込時」と「取得が完了した作品」だけ。
       //   時間経過だけでの再取得はしない（サーバー側は finishRun のタイミングで
       //   該当ドキュメントのキャッシュを明示的に無効化しているため、問い合わせれば
@@ -196,10 +198,15 @@
       var pendingEpIds = {};      // workId -> true
       var PROGRESS_CHUNK = 5;     // 1回の問い合わせで見る作品数（未キャッシュだと1件ずつ読むため）
 
-      // まだ一度もサイズを取得していない docId だけをまとめて問い合わせる（主にページ読込時）
+      // まだ一度もサイズを取得していない docId だけをまとめて問い合わせる（主にページ読込時）。
+      //   次話の問い合わせが進行中の作品はここでは飛ばす（次話の判定は途中で開いた
+      //   ドキュメントのサイズも一緒に返すので、そちらに任せて同じファイルを二重に開かない。
+      //   render() が maybeFetchProgress → maybeFetchSizes の順で呼ぶことで、
+      //   同一ポーリングで新規に問い合わせる作品でも pendingEpIds が先に立っている）。
       function maybeFetchSizes(works) {
         var need = [];
         works.forEach(function (w) {
+          if (pendingEpIds[w.workId]) return;
           w.docIds.forEach(function (id) {
             if (pendingSizeIds[id]) return;
             if (Object.prototype.hasOwnProperty.call(docSizes, id)) return;
@@ -281,11 +288,26 @@
         });
         google.script.run
           .withSuccessHandler(function (res) {
-            ids.forEach(function (id) {
-              delete pendingEpIds[id];
-              // 判定できなかった作品はキーごと返ってこない（未取得のままにして次回また試す）
-              if (res && Object.prototype.hasOwnProperty.call(res, id)) readingEp[id] = res[id];
+            ids.forEach(function (id) { delete pendingEpIds[id]; });
+            // 判定できなかった作品はキーごと返ってこない（未取得のままにして次回また試す）
+            if (res && res.progress) {
+              ids.forEach(function (id) {
+                if (Object.prototype.hasOwnProperty.call(res.progress, id)) readingEp[id] = res.progress[id];
+              });
+            }
+            // 判定の過程で開いたドキュメントのサイズも一緒に反映する（二重に開かない）
+            if (res && res.sizes) {
+              Object.keys(res.sizes).forEach(function (docId) { docSizes[docId] = res.sizes[docId]; });
+            }
+            // それでもサイズが不明な docId（見出しが早めに見つかり走査対象外だった巻）だけ、
+            // 改めて webGetDocSizes に問い合わせる
+            var remain = [];
+            works.forEach(function (w) {
+              w.docIds.forEach(function (id) {
+                if (!Object.prototype.hasOwnProperty.call(docSizes, id) && remain.indexOf(id) < 0) remain.push(id);
+              });
             });
+            if (remain.length > 0) fetchSizes(remain);
             renderTable();
           })
           .withFailureHandler(function () {
@@ -346,16 +368,35 @@
 
       function refresh() {
         google.script.run
-          .withSuccessHandler(render)
-          .withFailureHandler(function (err) { log('状態取得に失敗: ' + err.message, true); })
+          .withSuccessHandler(function (s) {
+            render(s);
+            scheduleNextRefresh(s.running.active ? POLL_ACTIVE_MS : POLL_IDLE_MS);
+          })
+          .withFailureHandler(function (err) {
+            log('状態取得に失敗: ' + err.message, true);
+            scheduleNextRefresh(POLL_IDLE_MS); // 失敗時は待機扱いで少し間を空けて再試行
+          })
           .webGetState();
+      }
+
+      // 実行中は7秒、待機中は30秒に間隔を落とす（待機中は状態が変わらないポーリングが
+      // 大半なので、operationsを増やさず取りに行く頻度だけ下げる）。
+      //   ボタン操作は call() が直後に refresh() を呼ぶので、間隔を落としても体感は変わらない。
+      //   ※ 操作パネル等 Web UI の外から取得を開始した場合は、画面が気づくまで
+      //     待機中の間隔ぶん（最大 POLL_IDLE_MS）遅れることがある。
+      function scheduleNextRefresh(delay) {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(function () {
+          if (busy) { scheduleNextRefresh(POLL_ACTIVE_MS); return; } // 操作中は少し待って再判定
+          refresh();
+        }, delay);
       }
 
       function render(s) {
         lastState = s;
         refreshChangedWorks(s.works);  // 完了した（updatedAtが変わった）作品を取り直す
-        maybeFetchSizes(s.works);      // 新しく現れた（未取得の）docId も取りに行く
-        maybeFetchProgress(s.works);   // 次話を知らない作品も取りに行く
+        maybeFetchProgress(s.works);   // 次話を知らない作品を先に問い合わせる（サイズも一緒に返る）
+        maybeFetchSizes(s.works);      // 次話の問い合わせでカバーされない docId だけ別途取りに行く
 
         var r = s.running;
         $('dot').className = 'dot' + (r.active ? ' on' : '');
@@ -572,9 +613,8 @@
           })(ths[i]);
         }
 
-        refresh();
+        refresh(); // 応答時に scheduleNextRefresh が呼ばれ、以降は自走する
         google.script.run.withSuccessHandler(renderLinks).webGetLinks();
-        timer = setInterval(function () { if (!busy) refresh(); }, 7000);
       });
     </script>
   </body>

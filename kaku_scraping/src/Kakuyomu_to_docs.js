@@ -1726,11 +1726,6 @@ function cleanupBufferFiles(workId) {
     try { epFiles.next().setTrashed(true); deleted++; } catch(e) {}
   }
 
-  const mergedFiles = getTargetFolder().searchFiles(`title contains '__kakuyomu_merged_${workId}'`);
-  while (mergedFiles.hasNext()) {
-    try { mergedFiles.next().setTrashed(true); deleted++; } catch(e) {}
-  }
-
   Logger.log(`バッファファイル削除: ${deleted} 件`);
 }
 

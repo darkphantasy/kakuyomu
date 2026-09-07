@@ -215,7 +215,7 @@ function webToggleShortFilename() {
 }
 
 // ==========================================
-// ドキュメントサイズ（バイト数）。7秒ポーリングの webGetState には含めず、
+// ドキュメントサイズ（バイト数）。定期ポーリングの webGetState には含めず、
 // クライアント側が「まだサイズを知らない docId」だけをまとめて呼ぶ専用関数。
 //   進捗の目安として使うだけなので、正確な文字数との対応は保証しない。
 //   CacheService（1時間）で Drive 呼び出し自体も抑える。
@@ -274,12 +274,17 @@ function invalidateDocSizeCache_(docIds) {
 //   PROGRESS_SCAN_CHARS 字だけ見れば足りる（全文を読む必要はない）。
 //
 //   引数: { workId: [docId, ...]（古い順） }
-//   返り値: { workId: 話数 or PROGRESS_LATEST }。判定できなかった作品はキーごと返さない
-//           （クライアント側は「未取得」として扱い、次回また問い合わせる）。
+//   返り値: { progress: { workId: 話数 or PROGRESS_LATEST }, sizes: { docId: バイト数 } }
+//     - progress は判定できなかった作品をキーごと返さない
+//       （クライアント側は「未取得」として扱い、次回また問い合わせる）。
+//     - sizes は判定の過程で実際に開いたドキュメントぶんだけ（＝docIds の一部のことが多い。
+//       見出しが見つかった時点で走査を打ち切るため）。判定に使ったサイズをそのまま返すので
+//       クライアント側の webGetDocSizes 呼び出しと二重にファイルを開かずに済む。
 // ==========================================
 function webGetReadingProgress(workDocIds) {
-  const result = {};
-  if (!workDocIds) return result;
+  const progress = {};
+  const sizes    = {};
+  if (!workDocIds) return { progress, sizes };
 
   const cache = CacheService.getScriptCache();
   Object.keys(workDocIds).forEach(workId => {
@@ -289,18 +294,20 @@ function webGetReadingProgress(workDocIds) {
     let value = PROGRESS_LATEST; // どの分冊にも見出しが残っていなければ「未読なし・最新話まで読了」
     for (let i = 0; i < docIds.length; i++) {
       const found = findFirstEpisodeNo_(cache, docIds[i]);
+      if (typeof found.size === 'number') sizes[docIds[i]] = found.size;
       if (found.status === 'error') return;                   // 判定不能：この作品は返さない
       if (found.status === 'found') { value = found.episode; break; }
       // 'skip'（削除済み）と 'none'（見出しが残っていない＝読了）はどちらも次の分冊へ
     }
-    result[workId] = value;
+    progress[workId] = value;
   });
 
-  return result;
+  return { progress, sizes };
 }
 
 // 1つのドキュメントについて、先頭に残っている最初の話数を返す。
-//   { status: 'found', episode } / 'none'（見出し無し） / 'skip'（削除済み） / 'error'
+//   { status: 'found', episode, size } / 'none'（見出し無し） / 'skip'（削除済み） / 'error'
+//   size は 'error' 以外なら必ず入る（'skip' は削除済み・アクセス不可の意味で 0）。
 //
 //   キャッシュキーにファイルサイズを含めているのがポイント。サイズが変わっていなければ
 //   中身も変わっていないので走査結果をそのまま使い回せる（＝読み進めてもいない、
@@ -310,26 +317,30 @@ function findFirstEpisodeNo_(cache, docId) {
   let size;
   try {
     const f = DriveApp.getFileById(docId);
-    if (f.isTrashed()) return { status: 'skip' };
+    if (f.isTrashed()) return { status: 'skip', size: 0 };
     size = f.getSize();
   } catch(e) {
-    return { status: 'skip' }; // 削除済み・アクセス不可
+    return { status: 'skip', size: 0 }; // 削除済み・アクセス不可
   }
 
   const key    = `${PROGRESS_CACHE_PREFIX}${docId}_${size}`;
   const cached = cache.get(key);
   if (cached != null) {
-    return (cached === '') ? { status: 'none' } : { status: 'found', episode: Number(cached) };
+    return (cached === '')
+      ? { status: 'none', size: size }
+      : { status: 'found', episode: Number(cached), size: size };
   }
 
   const head = fetchDocHeadText_(docId);
-  if (head == null) return { status: 'error' };
+  if (head == null) return { status: 'error', size: size };
 
   const m = head.match(EPISODE_TAG_RE);
   try { cache.put(key, m ? m[1] : '', PROGRESS_CACHE_SEC); }
   catch(e) { Logger.log('次話のキャッシュ書き込み失敗: ' + e); }
 
-  return m ? { status: 'found', episode: Number(m[1]) } : { status: 'none' };
+  return m
+    ? { status: 'found', episode: Number(m[1]), size: size }
+    : { status: 'none', size: size };
 }
 
 // ドキュメント本文の「先頭だけ」をプレーンテキストで取る。
