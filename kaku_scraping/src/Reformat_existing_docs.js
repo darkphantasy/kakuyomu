@@ -15,10 +15,11 @@
 // ==========================================
 
 // ここに対象ドキュメントのIDを列挙（URLの /d/ と /edit の間の文字列）
+//   ※ 実行のたびに書き換える一時的な設定なので、使い終わったら空に戻すこと
+//     （前回の対象が残っていると、意図しないドキュメントを書き換えてしまう）。
 const TARGET_DOC_IDS = [
   // '1AbcDEfgHIjkLMnoPQrsTUvwXYz0000000000001',
   // '1AbcDEfgHIjkLMnoPQrsTUvwXYz0000000000002',
-  '1Lqv-z8KdVs6LuQNNeC5e98rOOUKlkMrxssdZKzbNmNU'
 ];
 
 // 現在の書式設定（kakuyomu_to_docs.gs と同じ値に揃えてあります。変更する場合はここを編集）

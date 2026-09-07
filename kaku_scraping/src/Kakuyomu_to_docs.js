@@ -7,7 +7,7 @@
 //     ドキュメントを読み返さないのでメモリ安全。MAX_DOC_CHARS を大きく取れる＝少ファイル。
 //     整形を別フェーズで全段落再走査しないので高速。
 //   - ■ は挿入前に除去（後から消さない）→ 位置は加算のみで正確
-//   - フォント M PLUS 1 Code を全文適用
+//   - フォント BIZ UDGothic を全文適用（等幅・U+3000 を全角幅で描画できるため）
 //   - タイムアウトで取得件数を自動制御（無料Gmail 6分前提）
 //   - 完了時にバッファ残骸を一括掃除
 //   - 続き取得：記録の末尾 cursor から既存ドキュメントへ追記（無ければ作成／上限超過で新冊）
@@ -107,7 +107,9 @@ function getTargetFolderId() {
 
 // ==========================================
 // 続き取得の記録（作品ごとに保存。run状態とは別管理）
-//   RESUME_<workId> に { title, url, total, lastEpisodeId, docIds, updatedAt } を保存。
+//   RESUME_<workId> に { title, url, total, lastEpisodeId, docIds, lastCursor, updatedAt }
+//   を保存。lastCursor は参考値で、追記位置の決定には使わない（毎回 getDocEndCursor で
+//   実ファイルの終端を読み直す。ユーザーが読了分を先頭から削除する運用のため）。
 // ==========================================
 function resumeKey(workId) {
   return `RESUME_${workId}`;
@@ -499,7 +501,7 @@ function updateIndexSpreadsheet() {
   }
   if (!ss) {
     ss = SpreadsheetApp.create(INDEX_SHEET_NAME);
-    try { DriveApp.getFileById(ss.getId()).moveTo(DriveApp.getFolderById(getTargetFolderId())); }
+    try { DriveApp.getFileById(ss.getId()).moveTo(getTargetFolder()); }
     catch(e) { Logger.log('索引シートのフォルダ移動失敗: ' + e); }
     props.setProperty('INDEX_SHEET_ID', ss.getId());
   }
@@ -596,8 +598,7 @@ function findOrLocateSpreadsheet_(propKey, fileName) {
   }
   if (!ss) {
     try {
-      const folder = DriveApp.getFolderById(getTargetFolderId());
-      const it = folder.getFilesByName(fileName);
+      const it = getTargetFolder().getFilesByName(fileName);
       if (it.hasNext()) {
         const f = it.next();
         ss = SpreadsheetApp.openById(f.getId());
@@ -612,9 +613,11 @@ function findIndexSheet_() {
   return findOrLocateSpreadsheet_('INDEX_SHEET_ID', INDEX_SHEET_NAME);
 }
 
-// 索引シートの1行をパースする（列: 0:タイトル 1:話数 2:ファイル数 3:最終更新 4:元URL 5..:ファイル）。
+// 索引シートの1行をパースする。
+//   列: 0:短縮作品名(表示専用・記録には使わない) 1:作品タイトル 2:話数 3:ファイル数
+//       4:最終更新 5:元URL 6..:ファイル
+//   ※ 列位置を決め打ちしているので、updateIndexSpreadsheet の列を増減したら必ずここも直す。
 //   無効な行（タイトル/URL/作品ID のいずれかが取れない）なら null。
-// 列: 0:短縮作品名(表示専用・記録には使わない) 1:作品タイトル 2:話数 3:ファイル数 4:最終更新 5:元URL 6..:ファイル
 function parseIndexSheetRow_(values, formulas, r) {
   const title = values[r][1];
   if (!title) return null;
@@ -1114,8 +1117,6 @@ function runBuildPhase(props, startTime) {
   finishRun(props, workId, docIds, startTime);
 }
 
-// バッファ本文を、■ を外したクリーンなテキストと見出し位置に分解する。
-//   返り値: { clean, titles: [{offset, len}] }（offset/len はクリーン内の位置）
 // バッファ本文を、■ を外し空行を除いたクリーンなテキストと見出し位置に分解する。
 //   段落間は単一改行のみ（空段落を作らない）。余白の足し込みはしない。
 //   返り値: { clean, titles: [{offset, len}] }（offset/len はクリーン内の位置）
@@ -1259,7 +1260,7 @@ function createBuildDoc(title, docPart, contLabel) {
   const created = Docs.Documents.create({ title: fileName });
   const docId   = created.documentId;
   try {
-    DriveApp.getFileById(docId).moveTo(DriveApp.getFolderById(getTargetFolderId()));
+    DriveApp.getFileById(docId).moveTo(getTargetFolder());
   } catch(e) { Logger.log('新ドキュメントのフォルダ移動失敗: ' + e); }
 
   const headerText = name + '\n';

@@ -33,7 +33,7 @@ function setupControlPanel() {
   let ss = findControlPanelSheet_();
   if (!ss) {
     ss = SpreadsheetApp.create(CONTROL_PANEL_FILE_NAME);
-    try { DriveApp.getFileById(ss.getId()).moveTo(DriveApp.getFolderById(getTargetFolderId())); }
+    try { DriveApp.getFileById(ss.getId()).moveTo(getTargetFolder()); }
     catch(e) { Logger.log('操作パネルのフォルダ移動失敗: ' + e); }
     PropertiesService.getScriptProperties().setProperty('CONTROL_PANEL_SHEET_ID', ss.getId());
   }
