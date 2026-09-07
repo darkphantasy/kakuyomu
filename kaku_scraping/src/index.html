@@ -382,8 +382,8 @@
       // 実行中は7秒、待機中は30秒に間隔を落とす（待機中は状態が変わらないポーリングが
       // 大半なので、operationsを増やさず取りに行く頻度だけ下げる）。
       //   ボタン操作は call() が直後に refresh() を呼ぶので、間隔を落としても体感は変わらない。
-      //   ※ 操作パネル等 Web UI の外から取得を開始した場合は、画面が気づくまで
-      //     待機中の間隔ぶん（最大 POLL_IDLE_MS）遅れることがある。
+      //   ※ GAS エディタから直接関数を実行する等、Web UI の外から取得を開始した場合は、
+      //     画面が気づくまで待機中の間隔ぶん（最大 POLL_IDLE_MS）遅れることがある。
       function scheduleNextRefresh(delay) {
         if (timer) clearTimeout(timer);
         timer = setTimeout(function () {
@@ -558,7 +558,6 @@
           box.appendChild(a);
         }
         add(l.indexUrl, '索引シート');
-        add(l.panelUrl, '操作パネル');
       }
 
       // ---- 並び替え・絞り込み ----

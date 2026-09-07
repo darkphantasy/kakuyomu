@@ -14,8 +14,6 @@
 //   ※ 本番URL(/exec)はデプロイ版数に固定されるため、コード更新のたびに
 //     デプロイし直す必要がある。「テストデプロイ」の /dev URL は常に最新
 //     コードで動くので、clasp push だけで反映したい場合はそちらを使う。
-//
-//   操作パネル（ControlPanel.js のスプレッドシート）とは併存可能。
 // ==========================================
 
 const WEB_KICKOFF_DELAY_MS = 1000;   // Web UI から起動する際のトリガー遅延
@@ -381,12 +379,11 @@ function fetchDocHeadText_(docId) {
   return (text.length > PROGRESS_SCAN_CHARS) ? text.substring(0, PROGRESS_SCAN_CHARS) : text;
 }
 
-// 索引スプレッドシート・操作パネルへのリンク（画面から開けるように）
+// 索引スプレッドシートへのリンク（画面から開けるように）
 function webGetLinks() {
   const props = PropertiesService.getScriptProperties();
   const mk = (id) => id ? `https://docs.google.com/spreadsheets/d/${id}` : '';
   return {
     indexUrl: mk(props.getProperty('INDEX_SHEET_ID')),
-    panelUrl: mk(props.getProperty('CONTROL_PANEL_SHEET_ID')),
   };
 }

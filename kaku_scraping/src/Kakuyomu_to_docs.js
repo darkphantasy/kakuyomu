@@ -29,8 +29,6 @@
 //   rebuildRecordsFromSheet … 索引シートから記録を全面復元（スクリプト作り替え後の復旧用。既存記録も上書き）。
 //   checkProgress         … 実行中の進捗確認。
 //   resetAll              … 途中状態のリセット（記録・索引は残す）。
-//   setupControlPanel     … 操作パネル（別スプレッドシート）を作成/更新（初回のみ実行）。
-//                          パラメータをセルに入力し、パネルのメニュー「カクヨム操作」から実行できる。
 //
 // ※ 事前準備：エディタの「サービス」から「Docs API」を追加すること
 //    （userSymbol: Docs / version: v1）。挿入・整形に使用。
@@ -60,8 +58,6 @@ const INDEX_SHEET_NAME     = '【索引】カクヨム取得作品（表）';
 const INDEX_SHEET_TAB_NAME = '索引'; // 索引スプレッドシート内のシート（タブ）名
 
 const SHORT_FILENAME_MAX_LEN = 30; // ファイル名短縮：これを超えたら読点区切り or 強制トリミング
-
-// 操作パネル関連の定数・関数は ControlPanel.js に分離（同一プロジェクト内で共有スコープ）
 
 // runの途中経過に使うプロパティキー（完了時にこれだけ消す。記録・索引IDは残す）
 const RUN_STATE_KEYS = [
@@ -1375,7 +1371,6 @@ function finishRun(props, workId, docIds, startTime) {
       } else {
         props.setProperty('PHASE', PHASE_BATCH_NEXT);
         ensureTriggerAfter();
-        writePanelStatus_(`1作品完了。次の作品へ進みます（残り ${queue.length} 件）。`);
         Logger.log(`次の作品へ（残り ${queue.length} 作品）。`);
         return;
       }
@@ -1387,7 +1382,6 @@ function finishRun(props, workId, docIds, startTime) {
 
   props.setProperty('PHASE', PHASE_DONE);
   deleteTrigger();
-  writePanelStatus_('✅ すべて完了しました。');
   Logger.log('✅ すべて完了！');
 }
 

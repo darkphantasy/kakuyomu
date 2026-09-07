@@ -7,7 +7,6 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 このリポジトリでは `kaku_scraping/src/` 以下に GAS プロジェクト(KAKU_SCRAPING)を clasp で同期している。
 
 - `kaku_scraping/src/Kakuyomu_to_docs.js` … 本体。取得・整形パイプライン、続き取得、索引管理
-- `kaku_scraping/src/ControlPanel.js` … 操作パネル(別スプレッドシート)関連。GAS は同一プロジェクト内の複数ファイルを1つのグローバルスコープとして実行するため import/export は不要で、`Kakuyomu_to_docs.js` 側の関数・定数をそのまま参照できる。逆に `finishRun`(`Kakuyomu_to_docs.js`)は完了通知のため `writePanelStatus_` を直接呼んでおり、コア側からこのファイルへの依存が一部ある
 - `kaku_scraping/src/WebApp.js` … Web アプリ(取得インターフェース)。`doGet` と、クライアントから `google.script.run` で呼ばれる `web*` 関数群
 - `kaku_scraping/src/index.html` … Web UI 本体(単一ファイル。CSS/JS 込み)。`.claspignore` は `!*.html` を許可済みなので clasp で同期される
 - `kaku_scraping/src/appsscript.json` … マニフェスト(Docs API 有効化・OAuthスコープ・`webapp` 設定)
@@ -26,7 +25,7 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 - **ユーザーは読了した内容をドキュメント先頭側から削除して上書き保存する運用**。そのため保存済み cursor は信用できない。追記位置・再開位置は**毎回 `getDocEndCursor` で実ファイルの終端を読み直す**(実装済み。この前提を崩さない)。
 - Apps Script の `replaceText` は RE2 のため `　` 等の `\uXXXX` 表記が使えない("Invalid regular expression pattern")。■ 除去は文字位置ベースで行う。通常の JS 正規表現(`String.replace`)は問題ない。
 - `DriveApp.getFilesByName` / `searchFiles` はドライブ全体検索で遅い。**必ずフォルダ限定**(`findFileInFolder` / `getTargetFolder().searchFiles`)を使う。
-- 保存先は**スクリプトファイル自身の親フォルダ**(`getTargetFolderId()`)。索引・バッファ・成果物すべてここに置く前提。復元系(`rebuildRecordsFromSheet`)もこのフォルダを探す。索引スプレッドシートと操作パネル(後述)もこのフォルダに作成される(=リポジトリには存在しない、Drive上のみの実行時生成物)。
+- 保存先は**スクリプトファイル自身の親フォルダ**(`getTargetFolderId()`)。索引・バッファ・成果物すべてここに置く前提。復元系(`rebuildRecordsFromSheet`)もこのフォルダを探す。索引スプレッドシート(後述)もこのフォルダに作成される(=リポジトリには存在しない、Drive上のみの実行時生成物)。
 
 ## アーキテクチャ
 
@@ -38,16 +37,14 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 - **一括続き取得** (`startContinuationAll`): 全 `RESUME_` 記録をキュー(`BATCH_MODE`/`BATCH_QUEUE`)に積み、1 作品ずつ完走→次へ。新着なしはスキップ。**記録が 1 件も無ければ索引シートから復元**(`rebuildRecordsFromSheet`)してから回す。
 - **自動キューイング**: run 状態は単一スロット・`continuesFetch` の再開トリガーも 1 本しか持てないため**同時実行は不可**。そこで `startFetch` / `startContinuation` / `startContinuationAll` は先頭で `isRunActive_` を見て、実行中なら**エラーにせず `enqueueWork_` でキュー末尾に積む**(`BATCH_MODE='1'` もここで立てる)。完了時は既存の `finishRun` のバッチ分岐がそのまま次を取り出すので、非バッチで始まった run の後ろにも継ぎ足せる。キュー要素は `{url, mode:'fetch'|'cont', startEpisode?, endEpisode?}`。**旧形式(workId の文字列)も `normalizeQueueEntry_` が続き取得として受理**するので、移行中の残存キューは壊れない。`startFetch` は `prepareFetch`(run 状態をセットして true を返すだけ)と起動部に分割済みで、`batchStartNext` が mode で `prepareFetch` / `prepareContinuation` を出し分ける。
 - **索引**: スプレッドシートのみ(Doc 版索引は削除済み)。`updateIndexSpreadsheet` が全記録から再生成。1 作品 1 行、列は「短縮作品名/作品タイトル/話数/ファイル数/最終更新/元URL/ファイル1..N」(N は最大分冊数に合わせ可変、リンクは `=HYPERLINK()`)。**短縮作品名は表示専用**(`shortenTitleForFileName_` で都度算出。ON/OFFトグル `SHORT_FILENAME` に関わらず常に表示)で、記録・復元(`parseIndexSheetRow_`)には使わない。並び順は `compareWorksForDisplay_`(索引・Web UI 共通)で「最終更新の新しい順 → タイトル → 作品ID」。**`updatedAt` は分単位(`'yyyy-MM-dd HH:mm'`)までしか持たない**ため一括続き取得では同値が普通に発生し、タイブレークが無いと順序が `Object.keys(getProperties())` の順(呼び出しごとに変わりうる)任せになって行が入れ替わる。ID は `INDEX_SHEET_ID` プロパティに保持。シート内のタブ名は `INDEX_SHEET_TAB_NAME`(='索引')固定。索引シートを開く処理は `findOrLocateSpreadsheet_(propKey, fileName)` に共通化(`findIndexSheet_` はこのラッパー)。列位置は `parseIndexSheetRow_` に決め打ちで依存しているため、**列を増減させたら必ずこの関数も合わせて直す**。
-- **操作パネル**: 索引とは別のスプレッドシート(`CONTROL_PANEL_FILE_NAME`、同じ保存先フォルダに作成)。`setupControlPanel` で作成し、そのファイルに installable な onOpen トリガー(`onPanelOpen`)を登録する。パネルを開くとカスタムメニュー「カクヨム操作」が出る。**実行は必ずメニュークリックのみ**(誤操作防止のため onEdit/チェックボックスは使わない)。パラメータはセル(`PANEL_CELL_*`)から読み取り、各 `panelRunXxx` ハンドラが対応する関数(`startFetch`/`startContinuation`/`seedResumeRecord`/`clearResumeRecord`/`syncResumeRecordsFromSheet`/`rebuildIndex`)を呼び、結果をステータスセル(`PANEL_CELL_STATUS`)に書き戻す(`writePanelStatus_`)。多段実行(`startFetch`/`startContinuation`/`startContinuationAll`)は開始時点のメッセージのみ即時反映し、真の完了は `finishRun` の `PHASE_DONE` セット時に `writePanelStatus_` で改めて通知する。パネル未作成時、`writePanelStatus_` は何もしない(呼び出し元を壊さない)。
-
-- **ファイル名短縮**: `createBuildDoc` が新規ドキュメントを作る際、Driveの**ファイル名にのみ**短縮タイトル(`shortenTitleForFileName_`)を使う。**本文のHEADING_2見出し・`RESUME_`記録・索引シート・フッターは常に正タイトル**(引数 `title` そのまま)。ルールベース(AI不使用): ①「本題 〜サブタイトル〜」形式のサブタイトルを除去(`〜`=U+301C波ダッシュ/`～`=U+FF5E全角チルダの表記揺れに両対応。**似た文字だが別コードポイントなので注意**)、②`【】［］（）`で囲まれた注記を除去(文中強調のカッコも区別なく消えるため稀に不自然になるが許容)、③なお `SHORT_FILENAME_MAX_LEN=30` 文字超なら読点区切り、無ければ機械的トリミング+「…」。既知の制約: 読点区切りの結果が接続助詞等で終わり不自然になる場合や、本題部分が短すぎて一意性を欠く場合がある(実データ22件で評価済み・許容の上で採用)。ON/OFFは Script Property `SHORT_FILENAME`(操作パネルの「ファイル名短縮: ON/OFF切り替え」から切替可、デフォルトON)。
+- **ファイル名短縮**: `createBuildDoc` が新規ドキュメントを作る際、Driveの**ファイル名にのみ**短縮タイトル(`shortenTitleForFileName_`)を使う。**本文のHEADING_2見出し・`RESUME_`記録・索引シート・フッターは常に正タイトル**(引数 `title` そのまま)。ルールベース(AI不使用): ①「本題 〜サブタイトル〜」形式のサブタイトルを除去(`〜`=U+301C波ダッシュ/`～`=U+FF5E全角チルダの表記揺れに両対応。**似た文字だが別コードポイントなので注意**)、②`【】［］（）`で囲まれた注記を除去(文中強調のカッコも区別なく消えるため稀に不自然になるが許容)、③なお `SHORT_FILENAME_MAX_LEN=30` 文字超なら読点区切り、無ければ機械的トリミング+「…」。既知の制約: 読点区切りの結果が接続助詞等で終わり不自然になる場合や、本題部分が短すぎて一意性を欠く場合がある(実データ22件で評価済み・許容の上で採用)。ON/OFFは Script Property `SHORT_FILENAME`(Web UI の「ファイル名短縮: ON/OFF切り替え」ボタンから切替可、デフォルトON)。
 
 - **Web アプリ(取得インターフェース)**: `doGet` が `index.html` を返し、クライアントから `google.script.run` で `WebApp.js` の `web*` 関数を呼ぶ。**取得ロジック本体には手を入れず**、既存部品(`isRunActive_`/`enqueueWork_`/`prepareFetch`/`prepareContinuation`/`batchStartNext`/`ensureTriggerAfter`)の組み合わせで実装している。要点:
   - **即応起動**: `startFetch` 系は最初の5分ぶんを同一実行枠で走らせるため Web からはボタンが待たされる。そこで web 側は「run 状態をセット → `ensureTriggerAfter(WEB_KICKOFF_DELAY_MS)` で短い遅延のトリガーを張る」だけにして即座に返し、実処理はトリガー実行に任せる(`ensureTriggerAfter` は引数省略時 `RETRIGGER_DELAY_MS` で従来通り)。**GAS のトリガー発火には揺れがあるため、実際の開始は最大1分前後遅れることがある**。
   - **デプロイの落とし穴**: `deploy.yml` は `clasp push` のみでデプロイ版数を更新しないため、**本番URL(`/exec`)は古いコードのまま**になる。テストデプロイの **`/dev` URL は常に最新コード**で動くので、この運用では `/dev` を使う前提。`/exec` を使うならワークフローに `clasp deploy` の追加が必要。
   - マニフェストの `webapp`(`executeAs: USER_DEPLOYING` / `access: MYSELF`)は**スコープ追加ではないので再認可は不要**。`HtmlService` 自体も追加スコープ不要。
   - 一覧は行ごとに「続き取得」「削除」ボタンを持つ。作品タイトルは外部由来のため、クライアント側では必ず `textContent` で描画する(`innerHTML` に流し込まない)。
-  - **ポーリング間隔は状態に応じて可変**(`scheduleNextRefresh`): 実行中(`running.active`)は `POLL_ACTIVE_MS=7000`、待機中は `POLL_IDLE_MS=30000`。待機中は状態が変わらないポーリングが大半のため、頻度だけ落として無駄な `webGetState` 呼び出しを減らす。`setInterval` ではなく `refresh()` の応答後に次回を `setTimeout` で自分自身が予約する自走方式(取得失敗時も `POLL_IDLE_MS` で再試行し、ポーリングが止まらないようにする)。ボタン操作(`call()`)は成功時に直接 `refresh()` を呼ぶので、間隔を落としても操作直後の反映が遅れることはない。**Web UI の外(操作パネル等)から取得を開始した場合のみ**、画面が気づくまで最大 `POLL_IDLE_MS` 遅れることがある。
+  - **ポーリング間隔は状態に応じて可変**(`scheduleNextRefresh`): 実行中(`running.active`)は `POLL_ACTIVE_MS=7000`、待機中は `POLL_IDLE_MS=30000`。待機中は状態が変わらないポーリングが大半のため、頻度だけ落として無駄な `webGetState` 呼び出しを減らす。`setInterval` ではなく `refresh()` の応答後に次回を `setTimeout` で自分自身が予約する自走方式(取得失敗時も `POLL_IDLE_MS` で再試行し、ポーリングが止まらないようにする)。ボタン操作(`call()`)は成功時に直接 `refresh()` を呼ぶので、間隔を落としても操作直後の反映が遅れることはない。**Web UI の外(GAS エディタから直接関数実行等)から取得を開始した場合のみ**、画面が気づくまで最大 `POLL_IDLE_MS` 遅れることがある。
   - **並び替え・絞り込みはクライアント側だけで完結**(`renderTable` / `compareWorks`)。サーバーは呼ばないので定期ポーリングとは独立して動く。並び替え設定は `view` に保持し、自動更新で再描画されても維持される。第1キーが同値のときはサーバー側と同じくタイトル・作品IDでタイブレークして順序を固定する(同値のたびに行が入れ替わるのを防ぐ)。話数は `total` が文字列で来るため `Number()` してから比較する(文字列比較だと "598" < "84" になる)。
   - **ドキュメントサイズ表示**: 進捗の目安(参考値。実文字数と厳密には一致しない)。`webGetDocSizes(docIds)` は定期ポーリングの `webGetState` には含めない別経路。クライアント側は `docSizes`(docId→バイト数のフラットな連想配列。`hasOwnProperty` で「未取得」と「0バイト判明」を区別する)を持つ。更新のトリガーは2つ:
     - `maybeFetchSizes`: `docSizes` にまだ無い docId(主にページ再読込時)をまとめて取りに行く。ただし**次話の問い合わせが進行中(`pendingEpIds`)の作品は除外**する(次話の判定過程で開いたドキュメントのサイズも一緒に返ってくるので、同じファイルを二重に開かない。`render()` が `maybeFetchProgress` → `maybeFetchSizes` の順で呼ぶことで、同一ポーリング内で新規に問い合わせる作品でも `pendingEpIds` が先に立っている)
@@ -66,7 +63,6 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
     - 既知の割り切り: ①1話が2万字を超えると窓の外になり誤って「最新」表示になる、②読みかけの話は見出しごと消えているため、表示は実際に読んでいる話より**+1側に寄る**、③読書によるドキュメント削除は `updatedAt` を動かさないので、**読み進めた結果の反映は「ページ再読込時」が担う**(`updatedAt` 差分は取得完了の反映用)。
     - クライアントは `readingEp`(workId→話数 or `'latest'`)を持ち、`PROGRESS_CHUNK=5` 件ずつに分けて問い合わせる(未キャッシュだと1件ごとにドキュメントを読みに行くため、1回の呼び出しが長くなりすぎないように)。
     - **「未読のみ表示」チェックボックス**(`#unreadOnly`): `renderTable` の絞り込みに `readingEp[w.workId] === 'latest'` の除外を追加しただけ(テキスト絞り込みと同じくクライアント側完結)。**未取得(判定中)の作品は除外しない**(`readingEp` にキーが無い間は除外条件に一致しないため自然にそうなる)。「最新」が確定してから初めて消える=判定が届くまで一覧がちらつかない。
-  - 操作パネル(`ControlPanel.js`)とは併存可能。同じコア関数を呼ぶだけなので二重管理にはならない。
 
 ## データモデル(Script Properties)
 
@@ -74,7 +70,6 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 - `RESUME_<workId>` … 永続記録 `{title,url,total,lastEpisodeId,docIds,lastCursor,updatedAt}`。`lastCursor` は参考値であり**位置決定には使わない**。
 - `BATCH_MODE` / `BATCH_QUEUE` … 取得の順番待ちキュー(RUN_STATE_KEYS 外＝作品完了で消えない)。要素は `{url,mode,startEpisode?,endEpisode?}`(旧形式の workId 文字列も受理)。一括続き取得だけでなく、実行中に投げられた単発の取得もここに積まれる。
 - `INDEX_SHEET_ID` … 索引スプレッドシートの ID。
-- `CONTROL_PANEL_SHEET_ID` … 操作パネルスプレッドシートの ID。
 - `SHORT_FILENAME` … Driveのファイル名短縮のON/OFF(`'0'`でOFF、未設定含めそれ以外はON＝デフォルトON)。
 
 ## 書式仕様(現行)
@@ -88,9 +83,7 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 
 ## 実行する関数(ユーザー向けAPI)
 
-`startFetch(url?, startEpisode?, endEpisode?)` / `startContinuation(url?)` / `startContinuationAll` / `seedResumeRecord(url?, existingDocIds?)`(続き取得の一覧に追加) / `clearResumeRecord(url?)`(続き取得の一覧から削除。記録のみでドキュメントは残る) / `syncResumeRecordsFromSheet`(索引シートの行を正として一覧を差分同期。行追加=追加・行削除=削除、既存作品の記録は変更しない) / `checkResume(url?)` / `listResumeRecords` / `rebuildIndex` / `rebuildRecordsFromSheet`(索引シートから記録を全面復元。既存記録も上書きする点が syncResumeRecordsFromSheet と異なる) / `checkProgress` / `resetAll`(記録・索引は残し run 状態のみ消す) / `setupControlPanel`(操作パネルの作成・更新。初回のみ実行)。URL引数は省略時 `KAKUYOMU_URL` にフォールバックするので、エディタからの直接実行(引数なし)も従来どおり可能。デバッグ用に `START_EPISODE` / `END_EPISODE`(0=無制限)で取得範囲を絞れる(初回取得のみ有効。`startFetch` の引数でも上書き可)。
-
-操作パネルのメニューハンドラ(`panelRunXxx`、`onPanelOpen`)はパネル経由でのみ呼ばれる内部関数で、ユーザーがエディタから直接実行するものではない。`panelRunClearQueue` は順番待ちのみを取り消し、実行中の run は止めない。
+`startFetch(url?, startEpisode?, endEpisode?)` / `startContinuation(url?)` / `startContinuationAll` / `seedResumeRecord(url?, existingDocIds?)`(続き取得の一覧に追加) / `clearResumeRecord(url?)`(続き取得の一覧から削除。記録のみでドキュメントは残る) / `syncResumeRecordsFromSheet`(索引シートの行を正として一覧を差分同期。行追加=追加・行削除=削除、既存作品の記録は変更しない) / `checkResume(url?)` / `listResumeRecords` / `rebuildIndex` / `rebuildRecordsFromSheet`(索引シートから記録を全面復元。既存記録も上書きする点が syncResumeRecordsFromSheet と異なる) / `checkProgress` / `resetAll`(記録・索引は残し run 状態のみ消す)。URL引数は省略時 `KAKUYOMU_URL` にフォールバックするので、エディタからの直接実行(引数なし)も従来どおり可能。デバッグ用に `START_EPISODE` / `END_EPISODE`(0=無制限)で取得範囲を絞れる(初回取得のみ有効。`startFetch` の引数でも上書き可)。
 
 ## 開発ワークフロー
 
@@ -106,6 +99,10 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 ## 既知の注意・保留事項
 
 - ルビ(振り仮名)は現在の抽出(`stripHtmlTags` 系)で失われている可能性が高い。保持する場合は括弧併記等の折衷が必要(未着手・保留)。
-- 実行時 URL 入力の代替(`KAKUYOMU_URL` 直書きをやめる件)は、操作パネルと Web アプリで解消済み。`KAKUYOMU_URL` 定数は引数省略時のフォールバックとしてのみ残っている。
+- 実行時 URL 入力の代替(`KAKUYOMU_URL` 直書きをやめる件)は Web アプリで解消済み。`KAKUYOMU_URL` 定数は引数省略時のフォールバックとしてのみ残っている。
 - 縦書き HTML 出力(Noto Serif JP)の構想が過去にあった(Docs 出力とは別系統)。
 - `INDEX_DOC_ID` プロパティは旧 Doc 索引の残骸(無害・参照なし)。
+- **操作パネルは廃止済み**(`ControlPanel.js` を削除。Web アプリに統一)。ただし以下はコードからは触れないため残っている:
+  - Drive 上の「【操作パネル】カクヨム取得コンソール」スプレッドシート自体(不要なら手動でゴミ箱へ)。
+  - そのファイルに登録した installable な `onPanelOpen` トリガー。ハンドラ関数が無くなったため、**そのファイルを開くとエラーになる**。GAS エディタの「トリガー」画面から手動で削除するか、上記スプレッドシートごと削除すれば実質無害になる。
+  - `CONTROL_PANEL_SHEET_ID` プロパティ(`INDEX_DOC_ID` と同様の無害な残骸)。
