@@ -22,12 +22,12 @@ const WEB_KICKOFF_DELAY_MS = 1000;   // Web UI から起動する際のトリガ
 const DOC_SIZE_CACHE_SEC   = 3600;   // ドキュメントサイズのキャッシュ保持時間（1時間）
 const DOC_SIZE_CACHE_PREFIX = 'docsize_';
 
-// 既読話数の判定（読了ぶんを先頭から削除する運用が前提。後述の webGetReadingProgress）
+// 次話の判定（読了ぶんを先頭から削除する運用が前提。後述の webGetReadingProgress）
 const PROGRESS_SCAN_CHARS   = 20000;                    // ドキュメント先頭から何字ぶんを見るか
 const PROGRESS_SCAN_BYTES   = PROGRESS_SCAN_CHARS * 3;  // UTF-8 の日本語は1字3バイト
 const PROGRESS_CACHE_SEC    = 21600;                    // CacheService の上限（6時間）
 const PROGRESS_CACHE_PREFIX = 'progress_';
-const PROGRESS_LATEST       = 'latest';                 // 「最新話まで既読」を表す返り値
+const PROGRESS_LATEST       = 'latest';                 // 「未読なし・最新話まで読了」を表す返り値
 // 見出しは「<話タイトル> [NNN]」という1行。行末に寄せて本文中の [123] を拾わないようにする。
 const EPISODE_TAG_RE        = /^.*\[(\d{3,})\]\s*$/m;
 
@@ -268,9 +268,9 @@ function invalidateDocSizeCache_(docIds) {
 }
 
 // ==========================================
-// 既読話数（今どこまで読んだか）
+// 次話（今どこまで読んだか）
 //   読了したぶんをドキュメント先頭から削除していく運用なので、「先頭に残っている
-//   最初の [NNN]」が今読んでいる話にあたる。1話は概ね2000〜5000字なので、先頭
+//   最初の [NNN]」が今読んでいる（または次に読む）話にあたる。1話は概ね2000〜5000字なので、先頭
 //   PROGRESS_SCAN_CHARS 字だけ見れば足りる（全文を読む必要はない）。
 //
 //   引数: { workId: [docId, ...]（古い順） }
@@ -286,7 +286,7 @@ function webGetReadingProgress(workDocIds) {
     const docIds = Array.isArray(workDocIds[workId]) ? workDocIds[workId] : [];
     if (docIds.length === 0) return; // ドキュメントが無い作品は判定しない
 
-    let value = PROGRESS_LATEST; // どの分冊にも見出しが残っていなければ「最新話まで既読」
+    let value = PROGRESS_LATEST; // どの分冊にも見出しが残っていなければ「未読なし・最新話まで読了」
     for (let i = 0; i < docIds.length; i++) {
       const found = findFirstEpisodeNo_(cache, docIds[i]);
       if (found.status === 'error') return;                   // 判定不能：この作品は返さない
@@ -327,7 +327,7 @@ function findFirstEpisodeNo_(cache, docId) {
 
   const m = head.match(EPISODE_TAG_RE);
   try { cache.put(key, m ? m[1] : '', PROGRESS_CACHE_SEC); }
-  catch(e) { Logger.log('既読話数のキャッシュ書き込み失敗: ' + e); }
+  catch(e) { Logger.log('次話のキャッシュ書き込み失敗: ' + e); }
 
   return m ? { status: 'found', episode: Number(m[1]) } : { status: 'none' };
 }

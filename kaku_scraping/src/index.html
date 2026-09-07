@@ -139,7 +139,7 @@
           <thead>
             <tr>
               <th class="sortable" data-key="title">作品 <span class="ind"></span></th>
-              <th class="sortable num" data-key="episode">既読 <span class="ind"></span></th>
+              <th class="sortable num" data-key="episode">次話 <span class="ind"></span></th>
               <th class="sortable num" data-key="total">話数 <span class="ind"></span></th>
               <th class="sortable hide-sp" data-key="updatedAt">最終更新 <span class="ind"></span></th>
               <th class="hide-sp">ドキュメント</th>
@@ -188,11 +188,11 @@
       var pendingSizeIds = {};    // docId -> true（問い合わせ中の重複防止）
       var knownUpdatedAt = {};    // workId -> 前回ポーリング時点の updatedAt
 
-      // 既読話数（サイズと同じ2つのタイミングで更新する）。
+      // 次話（読み進み位置。サイズと同じ2つのタイミングで更新する）。
       //   読み進めてドキュメントを削るのはこちらの操作で、取得側の updatedAt は動かない。
       //   つまり読書ぶんの反映は「ページ再読込時」が受け持つ（サーバー側はサイズ込みの
       //   キャッシュキーなので、中身が変わっていない作品は読みに行かずに即返る）。
-      var readingEp = {};         // workId -> 話数 or 'latest'（最新話まで既読）
+      var readingEp = {};         // workId -> 話数 or 'latest'（未読なし＝最新話まで読了）
       var pendingEpIds = {};      // workId -> true
       var PROGRESS_CHUNK = 5;     // 1回の問い合わせで見る作品数（未キャッシュだと1件ずつ読むため）
 
@@ -209,7 +209,7 @@
         if (need.length > 0) fetchSizes(need);
       }
 
-      // まだ既読話数を知らない作品だけを問い合わせる（主にページ読込時）
+      // まだ次話を知らない作品だけを問い合わせる（主にページ読込時）
       function maybeFetchProgress(works) {
         var need = [];
         works.forEach(function (w) {
@@ -220,7 +220,7 @@
         fetchProgress(need);
       }
 
-      // 前回ポーリング時から updatedAt が変わった作品だけ、サイズと既読話数を取り直す
+      // 前回ポーリング時から updatedAt が変わった作品だけ、サイズと次話を取り直す
       //   （1作品完了するたびに、その作品ぶんだけ更新される）
       function refreshChangedWorks(works) {
         var changedDocIds = [];
@@ -294,14 +294,14 @@
           .webGetReadingProgress(map);
       }
 
-      // 一覧に出す既読話数の表示（未取得のうちは「…」）
+      // 一覧に出す次話の表示（未読なし＝最新話まで読了なら「最新」。未取得のうちは「…」）
       function episodeLabel(w) {
         if (!Object.prototype.hasOwnProperty.call(readingEp, w.workId)) return '…';
         var ep = readingEp[w.workId];
         return (ep === 'latest') ? '最新' : (ep + '話');
       }
 
-      // 並び替え用の数値。最新話まで既読＝全話読了とみなし話数を使う。未取得は末尾に寄せる。
+      // 並び替え用の数値。「最新」＝全話読了とみなし話数を使う。未取得は末尾に寄せる。
       function episodeValue(w) {
         if (!Object.prototype.hasOwnProperty.call(readingEp, w.workId)) return -1;
         var ep = readingEp[w.workId];
@@ -355,7 +355,7 @@
         lastState = s;
         refreshChangedWorks(s.works);  // 完了した（updatedAtが変わった）作品を取り直す
         maybeFetchSizes(s.works);      // 新しく現れた（未取得の）docId も取りに行く
-        maybeFetchProgress(s.works);   // 既読話数を知らない作品も取りに行く
+        maybeFetchProgress(s.works);   // 次話を知らない作品も取りに行く
 
         var r = s.running;
         $('dot').className = 'dot' + (r.active ? ' on' : '');
@@ -402,7 +402,7 @@
         var unreadOnly = $('unreadOnly').checked;
         var list = lastState.works.filter(function (w) {
           if (q && ((w.shortTitle || '') + ' ' + (w.title || '')).toLowerCase().indexOf(q) < 0) return false;
-          // 既読話数が「最新」と確定している（＝未読なし）作品を除外する。
+          // 次話が「最新」と確定している（＝未読なし）作品を除外する。
           // まだ判定中（未取得）の作品は、確定するまで消えたり出たりしないよう残す。
           if (unreadOnly && readingEp[w.workId] === 'latest') return false;
           return true;
