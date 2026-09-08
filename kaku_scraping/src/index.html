@@ -169,8 +169,7 @@
     <script>
       var busy = false;
       var timer = null;
-      var POLL_ACTIVE_MS = 7000;   // 実行中のポーリング間隔
-      var POLL_IDLE_MS   = 30000;  // 待機中のポーリング間隔（状態が変わらないので間隔を落とす）
+      var POLL_MS = 7000; // 実行中のポーリング間隔（待機中はそもそもポーリングしない）
       var lastState = null;                                      // 直近に取得した状態
       var view = { sortKey: 'updatedAt', sortDir: 'desc' };       // 一覧の並び替え設定
 
@@ -370,24 +369,28 @@
         google.script.run
           .withSuccessHandler(function (s) {
             render(s);
-            scheduleNextRefresh(s.running.active ? POLL_ACTIVE_MS : POLL_IDLE_MS);
+            // 取得操作を実行している間だけポーリングを続ける。待機中は次回を予約しない
+            // （GASの実行枠・UrlFetchAppクォータを、誰も見ていない間まで消費しないため）。
+            if (s.running.active) scheduleNextRefresh(POLL_MS);
           })
           .withFailureHandler(function (err) {
             log('状態取得に失敗: ' + err.message, true);
-            scheduleNextRefresh(POLL_IDLE_MS); // 失敗時は待機扱いで少し間を空けて再試行
+            scheduleNextRefresh(POLL_MS); // 実行中かどうか不明なので、いったん短い間隔で再試行してみる
           })
           .webGetState();
       }
 
-      // 実行中は7秒、待機中は30秒に間隔を落とす（待機中は状態が変わらないポーリングが
-      // 大半なので、operationsを増やさず取りに行く頻度だけ下げる）。
-      //   ボタン操作は call() が直後に refresh() を呼ぶので、間隔を落としても体感は変わらない。
+      // 待機中は自動更新が止まる。再開のきっかけは以下のいずれか:
+      //   - ボタン操作（call() が完了時に refresh() を呼ぶ。取得を開始すればここで active になり
+      //     ポーリングが再開する）
+      //   - 「今すぐ更新」ボタン、またはページの再読み込み
       //   ※ GAS エディタから直接関数を実行する等、Web UI の外から取得を開始した場合は、
-      //     画面が気づくまで待機中の間隔ぶん（最大 POLL_IDLE_MS）遅れることがある。
+      //     画面をリロードするかボタン操作するまで気づかない（以前は待機中ポーリングで
+      //     最大30秒以内に気づいていたが、常時ポーリングの負荷の方を優先した）。
       function scheduleNextRefresh(delay) {
         if (timer) clearTimeout(timer);
         timer = setTimeout(function () {
-          if (busy) { scheduleNextRefresh(POLL_ACTIVE_MS); return; } // 操作中は少し待って再判定
+          if (busy) { scheduleNextRefresh(POLL_MS); return; } // 操作中は少し待って再判定
           refresh();
         }, delay);
       }
