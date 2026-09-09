@@ -173,35 +173,20 @@
       var lastState = null;                                      // 直近に取得した状態
       var view = { sortKey: 'updatedAt', sortDir: 'desc' };       // 一覧の並び替え設定
 
-      // ドキュメントサイズ（参考値・目安）。定期ポーリングとは別経路で問い合わせる。
-      //   更新するのは「ページ再読込時」と「取得が完了した作品」だけ。
-      //   時間経過だけでの再取得はしない（サーバー側は finishRun のタイミングで
-      //   該当ドキュメントのキャッシュを明示的に無効化しているため、問い合わせれば
-      //   常に最新の値が返る）。
-      //
-      //   完了検知は running.active の true→false エッジでは行わない。一括続き取得は
-      //   数十分〜数時間かかることがあり、タブがバックグラウンドだとポーリングが
-      //   間引かれ、遷移の瞬間を取りこぼしてタブに戻ってきても二度と検出できなくなる。
-      //   代わりに、作品ごとの updatedAt を前回ポーリング時と比較し、**変化した作品だけ**
-      //   その場でサイズを取り直す（ポーリングが間引かれていても、次に動いた時点で
-      //   前回見た値との差分としてまとめて拾える）。
-      var docSizes = {};          // docId -> bytes
+      // ドキュメントサイズと次話は webGetState とは別経路で問い合わせ、ここに溜める。
+      //   更新のタイミングは「ページ再読込時（未取得ぶん）」と「updatedAt が変わった作品」の2つ。
+      //   running.active の遷移で検知しない理由や dedup の順序は CLAUDE.md を参照。
+      var docSizes = {};          // docId -> bytes（hasOwnProperty で「未取得」と「0=削除済み」を区別）
       var pendingSizeIds = {};    // docId -> true（問い合わせ中の重複防止）
       var knownUpdatedAt = {};    // workId -> 前回ポーリング時点の updatedAt
-
-      // 次話（読み進み位置。サイズと同じ2つのタイミングで更新する）。
-      //   読み進めてドキュメントを削るのはこちらの操作で、取得側の updatedAt は動かない。
-      //   つまり読書ぶんの反映は「ページ再読込時」が受け持つ（サーバー側はサイズ込みの
-      //   キャッシュキーなので、中身が変わっていない作品は読みに行かずに即返る）。
       var readingEp = {};         // workId -> 話数 or 'latest'（未読なし＝最新話まで読了）
       var pendingEpIds = {};      // workId -> true
       var PROGRESS_CHUNK = 5;     // 1回の問い合わせで見る作品数（未キャッシュだと1件ずつ読むため）
 
-      // まだ一度もサイズを取得していない docId だけをまとめて問い合わせる（主にページ読込時）。
-      //   次話の問い合わせが進行中の作品はここでは飛ばす（次話の判定は途中で開いた
-      //   ドキュメントのサイズも一緒に返すので、そちらに任せて同じファイルを二重に開かない。
-      //   render() が maybeFetchProgress → maybeFetchSizes の順で呼ぶことで、
-      //   同一ポーリングで新規に問い合わせる作品でも pendingEpIds が先に立っている）。
+      // まだサイズを知らない docId だけをまとめて問い合わせる（主にページ読込時）。
+      //   次話の問い合わせが進行中の作品は飛ばす（次話の判定結果にサイズも同梱されるため。
+      //   render() が maybeFetchProgress → maybeFetchSizes の順で呼ぶので、同一ポーリング内でも
+      //   pendingEpIds が先に立っている）。
       function maybeFetchSizes(works) {
         var need = [];
         works.forEach(function (w) {

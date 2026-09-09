@@ -42,19 +42,17 @@ function webGetState() {
   const props = PropertiesService.getScriptProperties();
   const all   = props.getProperties();
 
-  const works = Object.keys(all)
-    .filter(k => k.indexOf('RESUME_') === 0)
-    .map(k => {
-      let r; try { r = JSON.parse(all[k]); } catch(e) { r = {}; }
-      const title = r.title || '(無題)';
+  const works = loadResumeRecords_(all)
+    .map(({ workId, rec }) => {
+      const title = rec.title || '(無題)';
       return {
-        workId:     k.replace('RESUME_', ''),
+        workId:     workId,
         title:      title,
         shortTitle: shortenTitleForFileName_(title),
-        url:        r.url || '',
-        total:      (r.total != null ? String(r.total) : ''),
-        updatedAt:  r.updatedAt || '',
-        docIds:     r.docIds || [],
+        url:        rec.url || '',
+        total:      (rec.total != null ? String(rec.total) : ''),
+        updatedAt:  rec.updatedAt || '',
+        docIds:     rec.docIds || [],
       };
     })
     .sort(compareWorksForDisplay_); // 同分の作品が呼び出しごとに入れ替わらないよう決定的に並べる
@@ -124,11 +122,11 @@ function webStartContinuation(url) {
 
 // 一覧の全作品を順に続き取得（即応）。実行中なら順番待ちの末尾に積む。
 function webStartContinuationAll() {
-  const props = PropertiesService.getScriptProperties();
-  const keys  = Object.keys(props.getProperties()).filter(k => k.indexOf('RESUME_') === 0);
-  if (keys.length === 0) return { ok: false, message: '続き取得できる作品がありません。' };
+  const props   = PropertiesService.getScriptProperties();
+  const records = loadResumeRecords_();
+  if (records.length === 0) return { ok: false, message: '続き取得できる作品がありません。' };
 
-  const entries = keys.map(k => ({ workId: k.replace('RESUME_', ''), mode: 'cont' }));
+  const entries = records.map(r => ({ workId: r.workId, mode: 'cont' }));
 
   if (isRunActive_(props)) {
     const queue = JSON.parse(props.getProperty('BATCH_QUEUE') || '[]');

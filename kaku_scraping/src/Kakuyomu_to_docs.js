@@ -1,19 +1,12 @@
 // ==========================================
 // カクヨム 小説取得 → Googleドキュメント保存
-// 【改修版】2026-06
-//   - FETCHING：全話を取得してバッファファイルに蓄積（fetchAll による小規模並列）
-//   - フェーズ遷移・一括の作品切替は、時間が残っていれば同一実行枠で直結（トリガー待ち削減）
-//   - BUILD：Docs API で挿入しながら見出し・太字・フォントを同一バッチで適用。
-//     ドキュメントを読み返さないのでメモリ安全。MAX_DOC_CHARS を大きく取れる＝少ファイル。
-//     整形を別フェーズで全段落再走査しないので高速。
-//   - ■ は挿入前に除去（後から消さない）→ 位置は加算のみで正確
-//   - フォント BIZ UDGothic を全文適用（等幅・U+3000 を全角幅で描画できるため）
-//   - タイムアウトで取得件数を自動制御（無料Gmail 6分前提）
-//   - 完了時にバッファ残骸を一括掃除
-//   - 続き取得：記録の末尾 cursor から既存ドキュメントへ追記（無ければ作成／上限超過で新冊）
-//   - 一括続き取得：索引（＝全記録）の全作品を順に続き取得
-//   - 取得記録フッターを末尾に付与（追記時も末尾に新しいフッターを追加）
-//   - 保存先はスクリプトと同じフォルダ。索引スプレッドシートを自動生成・更新
+//
+//   全話を取得してバッファに蓄積（FETCHING）→ Docs API で挿入と整形を同一バッチで
+//   適用（BUILD）→ 記録・索引を更新（finishRun）。6分の実行上限に対しては、
+//   タイムアウト間際に状態を保存してトリガーで再開する多段実行方式。
+//   設計上の制約と「戻してはいけない判断」は CLAUDE.md を正とする。
+//
+//   命名: 末尾に _ が付く関数は内部用（GAS エディタの実行対象に出さない）。
 //
 // ■ 実行する関数
 //   startFetch(url?, startEpisode?, endEpisode?) … 初回。全話を取得して保存。
@@ -75,17 +68,6 @@ const RUN_STATE_KEYS = [
 var _cachedFolderId = null;
 var _cachedFolder   = null;
 
-// 保存先フォルダのオブジェクト（キャッシュ）
-function getTargetFolder() {
-  if (!_cachedFolder) _cachedFolder = DriveApp.getFolderById(getTargetFolderId());
-  return _cachedFolder;
-}
-
-// フォルダ内を名前で検索（ドライブ全体検索より速い）。無ければ null。
-function findFileInFolder(name) {
-  const it = getTargetFolder().getFilesByName(name);
-  return it.hasNext() ? it.next() : null;
-}
 function getTargetFolderId() {
   if (_cachedFolderId) return _cachedFolderId;
   try {
@@ -101,14 +83,41 @@ function getTargetFolderId() {
   return _cachedFolderId;
 }
 
+// 保存先フォルダのオブジェクト（キャッシュ）
+function getTargetFolder() {
+  if (!_cachedFolder) _cachedFolder = DriveApp.getFolderById(getTargetFolderId());
+  return _cachedFolder;
+}
+
+// フォルダ内を名前で検索（ドライブ全体検索より速い）。無ければ null。
+function findFileInFolder(name) {
+  const it = getTargetFolder().getFilesByName(name);
+  return it.hasNext() ? it.next() : null;
+}
+
 // ==========================================
 // 続き取得の記録（作品ごとに保存。run状態とは別管理）
 //   RESUME_<workId> に { title, url, total, lastEpisodeId, docIds, lastCursor, updatedAt }
 //   を保存。lastCursor は参考値で、追記位置の決定には使わない（毎回 getDocEndCursor で
 //   実ファイルの終端を読み直す。ユーザーが読了分を先頭から削除する運用のため）。
 // ==========================================
+const RESUME_PREFIX = 'RESUME_';
+
 function resumeKey(workId) {
-  return `RESUME_${workId}`;
+  return RESUME_PREFIX + workId;
+}
+
+// 全記録を [{ workId, rec }] で返す。壊れた JSON は {} として扱う。
+//   並び順は Object.keys 任せ（呼び出しごとに変わりうる）なので、順序が要る側でソートする。
+//   all を渡せばその Script Properties のスナップショットを使う（同じ実行内での再取得を省く）。
+function loadResumeRecords_(all) {
+  all = all || PropertiesService.getScriptProperties().getProperties();
+  return Object.keys(all)
+    .filter(k => k.indexOf(RESUME_PREFIX) === 0)
+    .map(k => {
+      let rec; try { rec = JSON.parse(all[k]); } catch(e) { rec = {}; }
+      return { workId: k.substring(RESUME_PREFIX.length), rec: rec };
+    });
 }
 
 function getResumeRecord(workId) {
@@ -208,19 +217,16 @@ function prepareFetch(url, startEpisode, endEpisode) {
 
   Logger.log(`作品ID: ${workId}`);
 
-  const topHtml = fetchHtml(targetUrl);
-  if (!topHtml) return false;
-
-  const nextData    = extractNextData(topHtml);
-  const title       = extractTitle(topHtml, nextData, workId);
-  const allEpisodes = collectAllEpisodes(topHtml, nextData, workId);
+  const catalog = loadWorkCatalog_(targetUrl, workId);
+  if (!catalog) return false;
+  const { title, episodes: allEpisodes } = catalog;
 
   Logger.log(`タイトル: ${title}`);
   Logger.log(`全エピソード数: ${allEpisodes.length}`);
 
   if (allEpisodes.length === 0) {
     Logger.log('エピソードが見つかりません。__NEXT_DATA__ を確認します。');
-    if (nextData) Logger.log(JSON.stringify(nextData).substring(0, 3000));
+    if (catalog.nextData) Logger.log(JSON.stringify(catalog.nextData).substring(0, 3000));
     return false;
   }
 
@@ -277,21 +283,16 @@ function startContinuation(url) {
 function startContinuationAll() {
   const props = PropertiesService.getScriptProperties();
 
-  let all  = props.getProperties();
-  let keys = Object.keys(all).filter(k => k.indexOf('RESUME_') === 0);
+  let records = loadResumeRecords_();
 
   // 記録が無い場合（スクリプト作り替え等）は索引シートから復元を試みる
-  if (keys.length === 0) {
+  if (records.length === 0) {
     Logger.log('続き取得記録がありません。索引シートからの復元を試みます。');
-    const n = rebuildRecordsFromSheet();
-    if (n > 0) {
-      all  = props.getProperties();
-      keys = Object.keys(all).filter(k => k.indexOf('RESUME_') === 0);
-    }
+    if (rebuildRecordsFromSheet() > 0) records = loadResumeRecords_();
   }
-  if (keys.length === 0) { Logger.log('続き取得できる作品がありません。'); return; }
+  if (records.length === 0) { Logger.log('続き取得できる作品がありません。'); return; }
 
-  const entries = keys.map(k => ({ workId: k.replace('RESUME_', ''), mode: 'cont' }));
+  const entries = records.map(r => ({ workId: r.workId, mode: 'cont' }));
 
   // 実行中なら全作品をキューの末尾に積むだけにする（現在の取得は止めない）
   if (isRunActive_(props)) {
@@ -365,11 +366,9 @@ function prepareContinuation(url) {
   }
   Logger.log(`記録: ${rec.total} 話まで取得済み（${rec.updatedAt}）`);
 
-  const topHtml = fetchHtml(url);
-  if (!topHtml) return false;
-  const nextData    = extractNextData(topHtml);
-  const title       = extractTitle(topHtml, nextData, workId);
-  const allEpisodes = collectAllEpisodes(topHtml, nextData, workId);
+  const catalog = loadWorkCatalog_(url, workId);
+  if (!catalog) return false;
+  const { title, episodes: allEpisodes } = catalog;
   if (allEpisodes.length === 0) { Logger.log('エピソードが見つかりません。'); return false; }
 
   // 起点の決定：末尾エピソードIDが現在の一覧にあればその次から。
@@ -430,11 +429,9 @@ function seedResumeRecord(url, existingDocIds) {
   const workId = extractWorkId(targetUrl);
   if (!workId) { Logger.log('作品IDの取得失敗'); return; }
 
-  const topHtml = fetchHtml(targetUrl);
-  if (!topHtml) return;
-  const nextData    = extractNextData(topHtml);
-  const title       = extractTitle(topHtml, nextData, workId);
-  const allEpisodes = collectAllEpisodes(topHtml, nextData, workId);
+  const catalog = loadWorkCatalog_(targetUrl, workId);
+  if (!catalog) return;
+  const { title, episodes: allEpisodes } = catalog;
   if (allEpisodes.length === 0) { Logger.log('エピソードが見つかりません。'); return; }
 
   // 既存ドキュメントがあれば末尾cursorを先取りして記録（続き取得時の追記起点）
@@ -478,41 +475,49 @@ function compareWorksForDisplay_(a, b) {
 }
 
 function updateIndexSpreadsheet() {
+  const records = loadResumeRecords_()
+    .map(({ workId, rec }) => Object.assign({ workId: workId }, rec))
+    .sort(compareWorksForDisplay_);
+
+  const ss    = openOrCreateIndexSpreadsheet_();
+  const sheet = resetIndexSheet_(ss);
+  const rows  = buildIndexRows_(records);
+  writeIndexRows_(sheet, rows);
+
+  Logger.log(`索引スプレッドシートを更新: ${records.length} 作品 → ${ss.getUrl()}`);
+}
+
+// INDEX_SHEET_ID のスプレッドシートを開く。無い・ゴミ箱なら新規作成して ID を保存する。
+function openOrCreateIndexSpreadsheet_() {
   const props = PropertiesService.getScriptProperties();
-  const all   = props.getProperties();
-  const keys  = Object.keys(all).filter(k => k.indexOf('RESUME_') === 0);
-
-  const records = keys.map(k => {
-    let r; try { r = JSON.parse(all[k]); } catch(e) { r = {}; }
-    r.workId = k.replace('RESUME_', '');
-    return r;
-  }).sort(compareWorksForDisplay_);
-
-  // スプレッドシートを開く or 作成
-  let ss = null;
-  const ssId = all['INDEX_SHEET_ID'];
+  const ssId  = props.getProperty('INDEX_SHEET_ID');
   if (ssId) {
-    try { if (!DriveApp.getFileById(ssId).isTrashed()) ss = SpreadsheetApp.openById(ssId); }
-    catch(e) { ss = null; }
+    try { if (!DriveApp.getFileById(ssId).isTrashed()) return SpreadsheetApp.openById(ssId); }
+    catch(e) { /* 開けなければ作り直す */ }
   }
-  if (!ss) {
-    ss = SpreadsheetApp.create(INDEX_SHEET_NAME);
-    try { DriveApp.getFileById(ss.getId()).moveTo(getTargetFolder()); }
-    catch(e) { Logger.log('索引シートのフォルダ移動失敗: ' + e); }
-    props.setProperty('INDEX_SHEET_ID', ss.getId());
-  }
+  const ss = SpreadsheetApp.create(INDEX_SHEET_NAME);
+  try { DriveApp.getFileById(ss.getId()).moveTo(getTargetFolder()); }
+  catch(e) { Logger.log('索引シートのフォルダ移動失敗: ' + e); }
+  props.setProperty('INDEX_SHEET_ID', ss.getId());
+  return ss;
+}
 
+// 索引タブを取得し、フィルターと内容を消して書き込める状態にする。
+function resetIndexSheet_(ss) {
   let sheet = ss.getSheetByName(INDEX_SHEET_TAB_NAME);
   if (!sheet) { sheet = ss.getSheets()[0]; sheet.setName(INDEX_SHEET_TAB_NAME); }
   const oldFilter = sheet.getFilter();
   if (oldFilter) oldFilter.remove();
   sheet.clear();
+  return sheet;
+}
 
-  // 最大ファイル数ぶん列を伸ばす（上限なし）
+// 索引の2次元配列（先頭行はヘッダー）を作る。ファイル列は最大分冊数ぶん横に伸ばす。
+//   列を増減させたら parseIndexSheetRow_ も合わせて直すこと。
+function buildIndexRows_(records) {
   const maxDocs = records.reduce((m, r) => Math.max(m, (r.docIds || []).length), 1);
   const headers = ['短縮作品名', '作品タイトル', '話数', 'ファイル数', '最終更新', '元URL'];
   for (let i = 1; i <= maxDocs; i++) headers.push(`ファイル${i}`);
-  const totalCols = headers.length;
 
   const rows = [headers];
   records.forEach(r => {
@@ -533,8 +538,13 @@ function updateIndexSpreadsheet() {
     }
     rows.push(row);
   });
+  return rows;
+}
 
-  // 必要な行・列を確保してから書き込み
+// 行を書き込み、ヘッダー装飾・行固定・余分な行列の削除・フィルター・列幅を整える。
+function writeIndexRows_(sheet, rows) {
+  const totalCols = rows[0].length;
+
   if (totalCols > sheet.getMaxColumns()) {
     sheet.insertColumnsAfter(sheet.getMaxColumns(), totalCols - sheet.getMaxColumns());
   }
@@ -543,31 +553,25 @@ function updateIndexSpreadsheet() {
   }
   sheet.getRange(1, 1, rows.length, totalCols).setValues(rows);
 
-  // ヘッダー装飾・行固定
   sheet.getRange(1, 1, 1, totalCols)
        .setBackground('#1F3864').setFontColor('#FFFFFF')
        .setFontWeight('bold').setHorizontalAlignment('center');
   sheet.setFrozenRows(1);
 
-  // 余分な行・列を削除（範囲を実データに合わせる）
   const maxC = sheet.getMaxColumns();
   if (maxC > totalCols) sheet.deleteColumns(totalCols + 1, maxC - totalCols);
   const maxR = sheet.getMaxRows();
   if (maxR > rows.length) sheet.deleteRows(rows.length + 1, maxR - rows.length);
 
-  // フィルター（最終範囲に対して）
   sheet.getRange(1, 1, rows.length, totalCols).createFilter();
 
-  // 列幅
   sheet.setColumnWidth(1, 200); // 短縮作品名
   sheet.setColumnWidth(2, 340); // 作品タイトル
   sheet.setColumnWidth(3, 64);  // 話数
   sheet.setColumnWidth(4, 84);  // ファイル数
   sheet.setColumnWidth(5, 150); // 最終更新
   sheet.setColumnWidth(6, 70);  // 元URL
-  for (let i = 7; i <= totalCols; i++) sheet.setColumnWidth(i, 72);
-
-  Logger.log(`索引スプレッドシートを更新: ${records.length} 作品 → ${ss.getUrl()}`);
+  if (totalCols >= 7) sheet.setColumnWidths(7, totalCols - 6, 72); // ファイル1..N
 }
 
 // 索引スプレッドシートを今すぐ再生成
@@ -706,9 +710,7 @@ function syncResumeRecordsFromSheet() {
     if (row) sheetWorks[row.workId] = row;
   }
 
-  const recordWorkIds = Object.keys(props.getProperties())
-    .filter(k => k.indexOf('RESUME_') === 0)
-    .map(k => k.replace('RESUME_', ''));
+  const recordWorkIds = loadResumeRecords_().map(r => r.workId);
 
   // 記録にあってシートに行が無い作品 → 削除
   let removed = 0;
@@ -728,11 +730,10 @@ function syncResumeRecordsFromSheet() {
     const w = sheetWorks[workId];
     Logger.log(`[追加] 新規行を検出:「${w.title}」(${w.url}) を取得します…`);
 
-    const topHtml = fetchHtml(w.url);
-    if (!topHtml) { Logger.log('  → 取得失敗のためスキップ'); return; }
-    const nextData    = extractNextData(topHtml);
-    const title       = extractTitle(topHtml, nextData, workId) || w.title;
-    const allEpisodes = collectAllEpisodes(topHtml, nextData, workId);
+    const catalog = loadWorkCatalog_(w.url, workId);
+    if (!catalog) { Logger.log('  → 取得失敗のためスキップ'); return; }
+    const title       = catalog.title || w.title;
+    const allEpisodes = catalog.episodes;
     if (allEpisodes.length === 0) { Logger.log('  → エピソードが見つからないためスキップ'); return; }
 
     let lastCursor = 0;
@@ -772,14 +773,12 @@ function checkResume(url) {
 
 // 保存済みの全作品の続き取得記録を一覧表示（作品をまたいで残っていることの確認用）
 function listResumeRecords() {
-  const all  = PropertiesService.getScriptProperties().getProperties();
-  const keys = Object.keys(all).filter(k => k.indexOf('RESUME_') === 0);
-  if (keys.length === 0) { Logger.log('続き取得記録はありません。'); return; }
+  const records = loadResumeRecords_();
+  if (records.length === 0) { Logger.log('続き取得記録はありません。'); return; }
 
-  Logger.log(`続き取得記録: ${keys.length} 作品`);
-  keys.forEach(k => {
-    let r; try { r = JSON.parse(all[k]); } catch(e) { r = {}; }
-    Logger.log(`- [${k.replace('RESUME_', '')}] ${r.title || ''} : ${r.total || '?'} 話 (${r.updatedAt || ''})`);
+  Logger.log(`続き取得記録: ${records.length} 作品`);
+  records.forEach(({ workId, rec }) => {
+    Logger.log(`- [${workId}] ${rec.title || ''} : ${rec.total || '?'} 話 (${rec.updatedAt || ''})`);
   });
 }
 
@@ -919,10 +918,7 @@ function runFetchPhase(props, startTime) {
 
         let epText = '（本文取得失敗）';
         if (epHtml) {
-          const epNextData = extractNextData(epHtml);
-          epText = epNextData
-            ? extractEpisodeTextFromNextData(epNextData)
-            : extractEpisodeTextFromHtml(epHtml);
+          epText = extractEpisodeText_(epHtml);
         } else {
           Logger.log(`スキップ: ${ep.url}`);
         }
@@ -1001,38 +997,11 @@ function runBuildPhase(props, startTime) {
 
   // 初回エントリ：対象ドキュメントと cursor を用意
   if (!docId) {
-    if (isCont && docIds.length > 0) {
-      const lastId = docIds[docIds.length - 1];
-      // 追記位置は記録の cursor ではなく、実ファイルの終端を毎回読んで正とする。
-      //   （記録の cursor が古い/不整合でも安全。読めない場合は新規ドキュメントへ）
-      let appendAt = 0;
-      if (docFileUsable(lastId)) {
-        try { appendAt = getDocEndCursor(lastId); }
-        catch(e) { Logger.log(`末尾cursor取得失敗（新規ドキュメントへ）: ${e}`); appendAt = 0; }
-      }
-      if (appendAt > 0 && (appendAt - 1) < MAX_DOC_CHARS) {
-        docId   = lastId;          // 既存末尾ドキュメントへ追記
-        cursor  = appendAt;
-        docPart = docIds.length - 1;
-        // 前回の最終段落（本文末尾やフッター）と新エピソードのタイトルが
-        // 同じ段落に連結しないよう、追記の先頭に空行を1つ入れて段落を分ける。
-        try {
-          Docs.Documents.batchUpdate(
-            { requests: [{ insertText: { location: { index: cursor }, text: '\n\n' } }] },
-            docId
-          );
-          cursor += 2;
-        } catch(e) { Logger.log('追記前の改行挿入に失敗: ' + e); }
-      }
-    }
-    if (!docId) {                  // 新規ドキュメント（ヘッダ＝見出し2）
-      docPart = docIds.length;
-      const created = createBuildDoc(title, docPart, contLabel);
-      docId  = created.docId;
-      cursor = created.cursor;
-      docIds.push(docId);
-    }
-    needSep = false; // 上のどちらの経路でも、この時点で既に段落が区切られている
+    const target = resolveBuildTarget_(isCont, docIds, title, contLabel);
+    docId   = target.docId;
+    cursor  = target.cursor;
+    docPart = target.docPart;
+    needSep = false; // 追記先頭の空行・新規ドキュメントのヘッダで、既に段落は区切られている
     persistBuild(props, bufIndex, cursor, docId, docPart, docIds, needSep);
   } else {
     // 再開時：前回実行以降にドキュメントが編集（読了分の削除など）されていても
@@ -1210,8 +1179,40 @@ function insertFooterIntoDoc(docId, cursor, footer) {
   }, docId);
 }
 
-// 新規ドキュメントをフォルダ内に作成し、1行目（タイトル＝見出し2）を入れる。
-//   返り値: { docId, cursor }（cursor は次の挿入位置）
+// BUILD の書き込み先を決める。続き取得で既存末尾ドキュメントが使えれば追記、
+//   使えなければ（無い・ゴミ箱・上限到達・終端が読めない）新規ドキュメントを作る。
+//   docIds は新規作成時にその場で push する（呼び出し側と同じ配列）。
+//   返り値: { docId, cursor, docPart }
+function resolveBuildTarget_(isCont, docIds, title, contLabel) {
+  if (isCont && docIds.length > 0) {
+    const lastId = docIds[docIds.length - 1];
+    // 追記位置は記録の cursor ではなく、実ファイルの終端を毎回読んで正とする。
+    let appendAt = 0;
+    if (docFileUsable(lastId)) {
+      try { appendAt = getDocEndCursor(lastId); }
+      catch(e) { Logger.log(`末尾cursor取得失敗（新規ドキュメントへ）: ${e}`); appendAt = 0; }
+    }
+    if (appendAt > 0 && (appendAt - 1) < MAX_DOC_CHARS) {
+      let cursor = appendAt;
+      // 前回の最終段落（本文末尾やフッター）と新エピソードのタイトルが
+      // 同じ段落に連結しないよう、追記の先頭に空行を1つ入れて段落を分ける。
+      try {
+        Docs.Documents.batchUpdate(
+          { requests: [{ insertText: { location: { index: cursor }, text: '\n\n' } }] },
+          lastId
+        );
+        cursor += 2;
+      } catch(e) { Logger.log('追記前の改行挿入に失敗: ' + e); }
+      return { docId: lastId, cursor: cursor, docPart: docIds.length - 1 };
+    }
+  }
+
+  const docPart = docIds.length;
+  const created = createBuildDoc(title, docPart, contLabel);
+  docIds.push(created.docId);
+  return { docId: created.docId, cursor: created.cursor, docPart: docPart };
+}
+
 // ファイル名短縮が有効か（Script Property 'SHORT_FILENAME'。未設定時はデフォルトON）
 function isShortFilenameEnabled_() {
   return PropertiesService.getScriptProperties().getProperty('SHORT_FILENAME') !== '0';
@@ -1244,6 +1245,8 @@ function shortenTitleForFileName_(title) {
   return s || title; // 万一空になったら元のタイトルにフォールバック
 }
 
+// 新規ドキュメントをフォルダ内に作成し、1行目（タイトル＝見出し2）を入れる。
+//   返り値: { docId, cursor }（cursor は次の挿入位置）
 function createBuildDoc(title, docPart, contLabel) {
   // 本文見出し・記録には常に正タイトルを使う。Driveのファイル名にのみ短縮版を使う。
   const base = `${title}${contLabel}`;
@@ -1324,6 +1327,7 @@ function persistBuild(props, bufIndex, cursor, docId, docPart, docIds, needSep) 
 //   記録には docIds と末尾 cursor を残し、次回の続き取得の追記起点にする。
 // ==========================================
 function finishRun(props, workId, docIds, startTime) {
+  docIds = docIds || [];
   if (workId) cleanupBufferFiles(workId);
 
   const total = props.getProperty('EPISODE_TOTAL');
@@ -1333,21 +1337,20 @@ function finishRun(props, workId, docIds, startTime) {
       url:           props.getProperty('SOURCE_URL') || '',
       total:         Number(total),
       lastEpisodeId: props.getProperty('LAST_EPISODE_ID') || '',
-      docIds:        docIds || [],
+      docIds:        docIds,
       lastCursor:    parseInt(props.getProperty('BUILD_CURSOR') || '0'),
       updatedAt:     Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm'),
     });
-    Logger.log(`続き取得記録を更新: ${total} 話 / ${(docIds || []).length} 冊`);
+    Logger.log(`続き取得記録を更新: ${total} 話 / ${docIds.length} 冊`);
     // Web UI のサイズ表示（webGetDocSizes）がこの作品ぶんだけ古い値を
     // 返さないよう、書き込みが確定したこのタイミングでキャッシュを消す。
-    try { invalidateDocSizeCache_(docIds || []); } catch(e) { Logger.log('サイズキャッシュ無効化に失敗: ' + e); }
+    try { invalidateDocSizeCache_(docIds); } catch(e) { Logger.log('サイズキャッシュ無効化に失敗: ' + e); }
   }
 
   try { updateIndexSpreadsheet(); } catch(e) { Logger.log('索引シート更新エラー: ' + e); }
 
-  const finalDocIds = docIds || [];
   Logger.log('✅ 作品完了！');
-  finalDocIds.forEach((id, i) => {
+  docIds.forEach((id, i) => {
     Logger.log(`ドキュメント ${i + 1}: https://docs.google.com/document/d/${id}`);
   });
 
@@ -1418,8 +1421,24 @@ function writeBuffer(token, fileName, content) {
 }
 
 // ==========================================
-// エピソード一覧収集（ページネーション対応）
+// 作品ページの読み込み（タイトル＋全話一覧）
 // ==========================================
+
+// 作品ページを1回取得して、タイトルと全話一覧をまとめて返す。
+//   HTML が取れなければ null（呼び出し側でログを出す）。episodes が空でもそのまま返す。
+//   nextData は診断用（呼び出し側が __NEXT_DATA__ をダンプしたい場合に使う）。
+function loadWorkCatalog_(url, workId) {
+  const topHtml = fetchHtml(url);
+  if (!topHtml) return null;
+  const nextData = extractNextData(topHtml);
+  return {
+    nextData: nextData,
+    title:    extractTitle(topHtml, nextData, workId),
+    episodes: collectAllEpisodes(topHtml, nextData, workId),
+  };
+}
+
+// エピソード一覧収集（ページネーション対応）
 function collectAllEpisodes(topHtml, nextData, workId) {
   if (nextData) {
     const episodes = extractEpisodesFromNextData(nextData, workId);
@@ -1561,6 +1580,14 @@ function extractEpisodesFromNextData(nextData, workId) {
       });
   } catch(e) { Logger.log('エピソード抽出エラー: ' + e); }
   return episodes;
+}
+
+// 1話ぶんの HTML から本文テキストを取り出す（__NEXT_DATA__ 優先、無ければ HTML を直接見る）
+function extractEpisodeText_(epHtml) {
+  const epNextData = extractNextData(epHtml);
+  return epNextData
+    ? extractEpisodeTextFromNextData(epNextData)
+    : extractEpisodeTextFromHtml(epHtml);
 }
 
 function extractEpisodeTextFromNextData(nextData) {
