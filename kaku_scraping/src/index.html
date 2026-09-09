@@ -606,6 +606,20 @@
       function doClearQueue() { call('webClearQueue', []); }
       function doToggleShort(){ call('webToggleShortFilename', []); }
 
+      // タブを離れた時点で実行中だった場合だけ、戻ってきたときに1回だけ確認する。
+      //   何も実行していない時にタブを切り替えても何も起きない（「実行中だけポーリング
+      //   する」方針と一貫させるため）。バックグラウンド中はブラウザがタイマーを間引く
+      //   ので、離席中に完了していても気づけないまま止まってしまう問題への対策。
+      var wasActiveWhenHidden = false;
+      document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+          wasActiveWhenHidden = !!(lastState && lastState.running && lastState.running.active);
+        } else if (wasActiveWhenHidden) {
+          wasActiveWhenHidden = false;
+          refresh(); // 離れている間に完了していた場合に備えて1回だけ確認する
+        }
+      });
+
       // ---- 初期化・自動更新 ----
       window.addEventListener('load', function () {
         var ths = document.querySelectorAll('th.sortable');
