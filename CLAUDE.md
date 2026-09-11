@@ -44,7 +44,7 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 - **続き取得**(`prepareContinuation`): 記録の `lastEpisodeId` を現目次と照合して差分だけ取得(無ければ話数フォールバック)。既存末尾ドキュメントへ追記。追記境界に `\n\n` を先に挿入する。
 - **一括続き取得**(`startContinuationAll`): 全記録をキューに積み 1 作品ずつ完走→次へ。新着なしはスキップ。記録が 1 件も無ければ索引シートから復元(`rebuildRecordsFromSheet`)してから回す。
 - **自動キューイング**: run は単一スロットで同時実行不可。`startFetch` / `startContinuation` / `startContinuationAll` は実行中なら**エラーにせず `enqueueWork_` でキュー末尾に積む**(`BATCH_MODE='1'` も立てる)。完了時は `finishRun` のバッチ分岐が次を取り出す。キュー要素は `{url, mode:'fetch'|'cont', startEpisode?, endEpisode?}`。旧形式(workId 文字列)も `normalizeQueueEntry_` が続き取得として受理する。`prepareFetch` / `prepareContinuation` は run 状態をセットして true を返すだけで、起動(`continuesFetch` かトリガー)は呼び出し側が行う。
-- **完了処理**(`finishRun`): バッファ掃除 → 記録保存 → サイズキャッシュ無効化 → 索引シート再生成 → run 状態クリア → バッチなら次へ(残り 60 秒以上なら同一枠で直結、足りなければ `PHASE_BATCH_NEXT` でトリガーに回す)。
+- **完了処理**(`finishRun`): バッファ掃除 → 記録保存 → サイズキャッシュ無効化 → 索引シート再生成 → run 状態クリア → バッチなら次へ(残り 60 秒以上なら同一枠で直結、足りなければトリガーに回す)。**`clearRunState` で `PHASE` が消えるので、バッチを続ける場合は `batchStartNext` を呼ぶ前に必ず `PHASE_BATCH_NEXT` を立てる**(下記の再発防止を参照)。
 - **索引シート**(`updateIndexSpreadsheet`): 全記録から毎回再生成。列は「短縮作品名 / 作品タイトル / 話数 / ファイル数 / 最終更新 / 元URL / ファイル1..N」。短縮作品名は表示専用で、復元(`parseIndexSheetRow_`)には使わない。**列を増減させたら必ず `parseIndexSheetRow_` の列番号も直す**。並び順は `compareWorksForDisplay_`(索引・Web UI 共通。最終更新降順 → タイトル → 作品ID。`updatedAt` は分単位なので同値が普通に起き、タイブレークが無いと行が入れ替わる)。ID は `INDEX_SHEET_ID`、タブ名は `INDEX_SHEET_TAB_NAME`。索引シートは**記録の復旧手段**(`rebuildRecordsFromSheet` / `syncResumeRecordsFromSheet`)でもあるので廃止しない。
 - **ファイル名短縮**(`shortenTitleForFileName_`): `createBuildDoc` が Drive の**ファイル名にのみ**使う。本文見出し・記録・索引・フッターは常に正タイトル。ルールベース: ①「本題 〜サブタイトル〜」を除去(`〜` U+301C と `～` U+FF5E は別コードポイント。両対応)、②`【】［］（）` の注記を除去、③ `SHORT_FILENAME_MAX_LEN`(30)超なら読点区切り、無ければ機械的トリミング+「…」。既知の制約(不自然な切れ方・一意性低下)は許容済み。ON/OFF は Script Property `SHORT_FILENAME`(既定 ON)。
 
@@ -114,6 +114,8 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 - Web UI の完了検知に `running.active` の true→false エッジ検出を使わない。バックグラウンドタブでは遷移の瞬間を取りこぼして二度と検出できない。**`updatedAt` の差分検出**(`refreshChangedWorks`)が正。
 - `refreshChangedWorks` のサイズ取得を次話側の dedup に巻き込まない(上記)。
 - 待機中の常時ポーリングを復活させない。`visibilitychange` で無条件に `refresh()` しない。
+- **`batchStartNext` を呼ぶ前に `PHASE` を空のままにしない**。この関数は目次取得(ネットワーク・新着無しの作品は読み飛ばすので長い)を伴い、その間 `PHASE` が無いと `isRunActive_` が false → Web UI が「待機中」と判断してポーリングを永久に止める。`finishRun` のバッチ分岐・`startContinuationAll`・`webStartContinuationAll` の 3 箇所で、呼ぶ直前に `PHASE_BATCH_NEXT` を立てている(2026-09 の「取得状況が画面更新されない」不具合の原因)。
+- `refresh()` の成功ハンドラでは**次回の予約を `render()` より先に行う**。逆順にすると描画中の 1 回の例外でポーリングが二度と再開しない。
 - `FETCH_PARALLEL` / `FETCH_SLEEP_MS` を速度目的で変えない。
 - 索引スプレッドシートを廃止しない(記録の復旧手段)。
 - 一括続き取得中に作品ごとの索引再生成をまとめる案(`finishRun` の `updateIndexSpreadsheet` をバッチ末尾に寄せる)は未採用。採用するなら再提案から。

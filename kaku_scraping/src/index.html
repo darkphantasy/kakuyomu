@@ -353,10 +353,12 @@
       function refresh() {
         google.script.run
           .withSuccessHandler(function (s) {
-            render(s);
             // 取得操作を実行している間だけポーリングを続ける。待機中は次回を予約しない
             // （GASの実行枠・UrlFetchAppクォータを、誰も見ていない間まで消費しないため）。
-            if (s.running.active) scheduleNextRefresh(POLL_MS);
+            //   描画より先に予約する。render() で例外が出ても次回が生き残るようにするため
+            //   （順序を入れ替えると、描画中の1回の例外でポーリングが二度と再開しない）。
+            if (s && s.running && s.running.active) scheduleNextRefresh(POLL_MS);
+            render(s);
           })
           .withFailureHandler(function (err) {
             log('状態取得に失敗: ' + err.message, true);

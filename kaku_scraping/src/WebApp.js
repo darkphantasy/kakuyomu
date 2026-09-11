@@ -137,10 +137,13 @@ function webStartContinuationAll() {
     return { ok: true, message: `実行中のため、${entries.length} 作品を順番待ちに追加しました。` };
   }
 
-  props.setProperties({ BATCH_MODE: '1', BATCH_QUEUE: JSON.stringify(entries) });
+  // PHASE を先に立ててから batchStartNext に入る（目次取得の間も「実行中」に見せるため。
+  // 理由は finishRun のバッチ分岐のコメントを参照）。
+  props.setProperties({ BATCH_MODE: '1', BATCH_QUEUE: JSON.stringify(entries), PHASE: PHASE_BATCH_NEXT });
   if (!batchStartNext(props)) {
     props.deleteProperty('BATCH_MODE');
     props.deleteProperty('BATCH_QUEUE');
+    props.deleteProperty('PHASE');
     return { ok: true, message: '新着のある作品はありませんでした。' };
   }
 

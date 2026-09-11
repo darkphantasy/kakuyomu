@@ -305,12 +305,15 @@ function startContinuationAll() {
     return;
   }
 
-  props.setProperties({ BATCH_MODE: '1', BATCH_QUEUE: JSON.stringify(entries) });
+  // PHASE を先に立ててから batchStartNext に入る（目次取得の間も「実行中」に見せるため。
+  // 理由は finishRun のバッチ分岐のコメントを参照）。
+  props.setProperties({ BATCH_MODE: '1', BATCH_QUEUE: JSON.stringify(entries), PHASE: PHASE_BATCH_NEXT });
   Logger.log(`一括続き取得：${entries.length} 作品を順に処理します。`);
 
   if (!batchStartNext(props)) {
     props.deleteProperty('BATCH_MODE');
     props.deleteProperty('BATCH_QUEUE');
+    props.deleteProperty('PHASE');
     Logger.log('一括続き取得：新着のある作品はありませんでした。');
     return;
   }
@@ -1362,17 +1365,22 @@ function finishRun(props, workId, docIds, startTime) {
   if (props.getProperty('BATCH_MODE') === '1') {
     const queue = JSON.parse(props.getProperty('BATCH_QUEUE') || '[]');
     if (queue.length > 0) {
+      // 次の作品を決める batchStartNext は目次取得（ネットワーク）を伴い、新着の無い
+      // 作品を読み飛ばすぶんだけ時間がかかる。上の clearRunState で PHASE を消した
+      // ままここに入ると、その間 isRunActive_ が false になり、Web UI が「待機中」と
+      // 判断してポーリングを止めてしまう。目次取得の前に必ず PHASE を立てておく。
+      props.setProperty('PHASE', PHASE_BATCH_NEXT);
+
       const canInline = (typeof startTime === 'number') &&
         (Date.now() - startTime < TIMEOUT_THRESHOLD_MS - 60 * 1000);
       if (canInline) {
         Logger.log(`次の作品へ直結（残り ${queue.length} 作品）。`);
-        if (batchStartNext(props)) {
+        if (batchStartNext(props)) { // 成功時は PHASE=FETCHING に置き換わる
           runFetchPhase(props, startTime);
           return;
         }
-        // キューを使い切り、新着のある作品が無かった → そのまま完了処理へ
+        // キューを使い切り、新着のある作品が無かった → そのまま完了処理へ（PHASE は下で DONE に）
       } else {
-        props.setProperty('PHASE', PHASE_BATCH_NEXT);
         ensureTriggerAfter();
         Logger.log(`次の作品へ（残り ${queue.length} 作品）。`);
         return;
