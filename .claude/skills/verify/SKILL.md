@@ -62,6 +62,8 @@ FAIL 行と「期待 / 実際」を読んで、**テストの期待値が古い�
 | 次話判定（先頭 2 万字・Range・サイズ付きキャッシュ）と dedup | `test_progress2.js`, `test_ui_progress2.js` |
 | 未読のみ表示は 'latest' だけ除外 | `test_unread_filter.js` |
 | 可読性リファクタ後の各部品の等価性 | `test_core_refactor.js` |
+| 抽出ブックマークレットの未読・全話数の正規表現は空白の有無を問わない | `test_seed_extract.js` |
+| 「一覧」「候補から選んで登録」タブの切り替え・自動更新で戻らない | `test_tabs.js` |
 
 ## 3. 使い捨ての実験
 

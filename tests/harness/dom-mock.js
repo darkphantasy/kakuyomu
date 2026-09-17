@@ -19,6 +19,7 @@
 //   runner        … google.script.run の実体。オブジェクトか、呼ぶたびに新しい実体を返す関数
 //                   （withSuccessHandler / withFailureHandler / web* をチェーンできること）
 //   buttons       … ボタン配列の初期値（既定 2 個）
+//   tabTabs       … querySelectorAll('.tab-btn') が返すタブの data-tab 値（既定 ['works','seed']）
 //   setTimeout    … 差し替え（既定は state.timers に積むだけ）
 //   clearTimeout  … 差し替え
 //   stubFetchers  … true（既定）なら renderTable / refreshChangedWorks / maybeFetchProgress /
@@ -45,6 +46,15 @@ function createUiSandbox(opts = {}) {
   };
   const elements = {};
 
+  // querySelectorAll('.tab-btn') 用（タブ切り替えの active クラス付け替えを見る）。
+  // data-tab 属性と className の get/set をサポートする最小モック。
+  state.tabButtons = (opts.tabTabs || ['works', 'seed']).map(tab => {
+    const btn = { getAttribute: k => (k === 'data-tab' ? tab : null) };
+    let cls = '';
+    Object.defineProperty(btn, 'className', { get: () => cls, set: v => { cls = v; } });
+    return btn;
+  });
+
   function element(id) {
     if (elements[id]) return elements[id];
     const el = {
@@ -62,7 +72,7 @@ function createUiSandbox(opts = {}) {
   const document = {
     hidden: !!opts.hidden,
     getElementById: element,
-    querySelectorAll: () => state.buttons,
+    querySelectorAll: sel => (sel === '.tab-btn' ? state.tabButtons : state.buttons),
     addEventListener(type, fn) { (state.listeners[type] = state.listeners[type] || []).push(fn); },
     createElement: () => {
       const el = { appendChild() {}, classList: { add() {} }, style: {}, addEventListener() {} };

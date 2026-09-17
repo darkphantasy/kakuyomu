@@ -57,6 +57,18 @@
         text-decoration: none; cursor: grab; user-select: none;
       }
       a.bookmarklet:hover { background: #2c4d8a; }
+      .tabbar { display: flex; gap: 4px; margin-bottom: -1px; }
+      .tab-btn {
+        padding: 9px 16px; border: 1px solid transparent; border-bottom: none;
+        border-radius: 8px 8px 0 0; background: transparent; color: var(--muted);
+        font-size: 13px; font-weight: 600; font-family: inherit; cursor: pointer;
+      }
+      .tab-btn:hover { color: var(--accent); }
+      .tab-btn.active {
+        color: var(--accent); background: var(--card);
+        border-color: var(--line); position: relative; z-index: 1;
+      }
+      .tab-count { font-weight: 400; color: var(--muted); }
       details summary { cursor: pointer; font-size: 12px; color: var(--muted); margin-top: 10px; }
       .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
       table { width: 100%; border-collapse: collapse; margin-top: 10px; }
@@ -126,7 +138,12 @@
         </div>
       </div>
 
-      <div class="card">
+      <div class="tabbar">
+        <button type="button" class="tab-btn" data-tab="works" onclick="setActiveTab('works')">一覧 <span id="tabWorksCount" class="tab-count"></span></button>
+        <button type="button" class="tab-btn" data-tab="seed" onclick="setActiveTab('seed')">候補から選んで登録 <span id="tabSeedCount" class="tab-count"></span></button>
+      </div>
+
+      <div class="card" id="tabPanel-works">
         <h2>一覧 <span id="workCount" style="color:var(--muted);font-weight:400"></span></h2>
         <div class="btns" style="margin-top:0">
           <button class="primary" onclick="doContAll()">一括続き取得</button>
@@ -157,7 +174,7 @@
         <div id="worksEmpty" class="empty" style="display:none"></div>
       </div>
 
-      <div class="card">
+      <div class="card" id="tabPanel-seed" hidden>
         <h2>候補から選んで登録</h2>
         <p style="font-size:12px;color:var(--muted);margin:0 0 8px">
           下のリンクをブラウザの<b>ブックマークバーへドラッグ</b>してください。カクヨムの
@@ -228,6 +245,26 @@
       var POLL_MS = 7000; // 実行中のポーリング間隔（待機中はそもそもポーリングしない）
       var lastState = null;                                      // 直近に取得した状態
       var view = { sortKey: 'updatedAt', sortDir: 'desc' };       // 一覧の並び替え設定
+
+      // 「一覧」「候補から選んで登録」はタブ切り替え（画面下部までスクロールしないでも
+      //   候補一覧に届くようにするため）。自動更新のたびに選択タブが戻らないよう、
+      //   ここに状態を持つだけで render() 側からは触らない。
+      var activeTab = 'works'; // 'works' | 'seed'
+
+      function setActiveTab(tab) {
+        activeTab = tab;
+        renderTabs();
+      }
+
+      function renderTabs() {
+        var btns = document.querySelectorAll('.tab-btn');
+        for (var i = 0; i < btns.length; i++) {
+          var isActive = btns[i].getAttribute('data-tab') === activeTab;
+          btns[i].className = 'tab-btn' + (isActive ? ' active' : '');
+        }
+        $('tabPanel-works').hidden = (activeTab !== 'works');
+        $('tabPanel-seed').hidden = (activeTab !== 'seed');
+      }
 
       // ドキュメントサイズと次話は webGetState とは別経路で問い合わせ、ここに溜める。
       //   更新のタイミングは「ページ再読込時（未取得ぶん）」と「updatedAt が変わった作品」の2つ。
@@ -639,6 +676,7 @@
         $('workCount').textContent = (q || unreadOnly)
           ? '（' + list.length + ' / ' + total + ' 作品）'
           : '（' + total + ' 作品）';
+        $('tabWorksCount').textContent = total ? '(' + total + ')' : '';
 
         // 並び替えインジケータ
         var ths = document.querySelectorAll('th.sortable');
@@ -747,6 +785,17 @@
         try { items = JSON.parse(raw); } catch (e) { log('JSON として読み取れませんでした: ' + e.message, true); return; }
         if (!Array.isArray(items)) { log('配列の JSON を貼り付けてください。', true); return; }
 
+        // 空配列を貼り付けたときは「候補一覧をクリアしたい」という意図として扱う
+        // （マージではなく上書き）。件数が読み取れない・URL が無効等で 0 件になった
+        // 場合（items.length > 0）は既存候補を保持したまま、その旨だけログに出す。
+        if (items.length === 0) {
+          seedCandidates = {};
+          $('seedPaste').value = '';
+          log('空の配列が貼り付けられたため、候補一覧をクリアしました。');
+          renderSeedList();
+          return;
+        }
+
         var added = 0;
         items.forEach(function (it) {
           var workId = extractWorkIdFromUrl_(it && it.url);
@@ -825,6 +874,7 @@
 
         var workIds = Object.keys(seedCandidates);
         $('seedEmpty').style.display = workIds.length ? 'none' : 'block';
+        $('tabSeedCount').textContent = workIds.length ? '(' + workIds.length + ')' : '';
 
         workIds.forEach(function (workId) {
           var c = seedCandidates[workId];
@@ -955,6 +1005,8 @@
             th.onclick = function () { setSort(th.getAttribute('data-key')); };
           })(ths[i]);
         }
+
+        renderTabs();
 
         var bookmarklet = buildSeedBookmarklet_();
         var bm = $('seedBookmarklet');
