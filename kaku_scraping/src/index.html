@@ -51,6 +51,12 @@
       button.primary:hover:not(:disabled) { background: #2c4d8a; }
       button.mini { padding: 4px 9px; font-size: 12px; }
       button.danger { color: var(--danger); border-color: #e6c9c6; }
+      a.bookmarklet {
+        display: inline-block; padding: 8px 14px; border: 1px solid var(--accent);
+        border-radius: 6px; background: var(--accent); color: #fff; font-size: 13px;
+        text-decoration: none; cursor: grab; user-select: none;
+      }
+      a.bookmarklet:hover { background: #2c4d8a; }
       details summary { cursor: pointer; font-size: 12px; color: var(--muted); margin-top: 10px; }
       .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
       table { width: 100%; border-collapse: collapse; margin-top: 10px; }
@@ -154,11 +160,21 @@
       <div class="card">
         <h2>候補から選んで登録</h2>
         <p style="font-size:12px;color:var(--muted);margin:0 0 8px">
-          カクヨムの「<a href="https://kakuyomu.jp/my/reading_histories" target="_blank">閲覧履歴</a>」または
-          「<a href="https://kakuyomu.jp/my/antenna/works?serial_status=all" target="_blank">未読あり</a>」を開いた状態で、
-          ブラウザの開発者ツール（コンソール）に抽出スクリプト（<code>kaku_scraping/tools/</code> 参照）を貼り付けて実行し、
-          出力された JSON をここに貼り付けてください。
+          下のリンクをブラウザの<b>ブックマークバーへドラッグ</b>してください。カクヨムの
+          「<a href="https://kakuyomu.jp/my/reading_histories" target="_blank">閲覧履歴</a>」または
+          「<a href="https://kakuyomu.jp/my/antenna/works?serial_status=all" target="_blank">未読あり</a>」を開いた状態でそのブックマークをクリックすると、
+          作品一覧（URL・タイトル・未読話数・全話数）が JSON でダイアログに表示されます。全選択（Ctrl+A / Cmd+A）してコピーし、下の欄に貼り付けてください。
         </p>
+        <p>
+          <a id="seedBookmarklet" class="bookmarklet" href="#" title="ここをブックマークバーへドラッグ" onclick="return false;">📥 カクヨム作品一覧を抽出</a>
+        </p>
+        <details>
+          <summary>ドラッグできない場合</summary>
+          <p style="font-size:12px;color:var(--muted)">
+            同じ処理を <code>kaku_scraping/tools/extract_antenna_list.js</code> としてリポジトリにも置いています。
+            カクヨムのページを開いた状態でブラウザの開発者ツール（コンソール）にその中身を貼り付けて実行しても、同じ結果が得られます。
+          </p>
+        </details>
         <textarea id="seedPaste" rows="3" style="width:100%;font-family:monospace;font-size:12px;padding:8px;border:1px solid var(--line);border-radius:6px" placeholder='[{"url":"https://kakuyomu.jp/works/...","title":"...","unread":8,"total":305}, ...]'></textarea>
         <div class="btns">
           <button onclick="doParseSeed()">読み込み</button>
@@ -215,6 +231,51 @@
       // 候補から選んで登録（閲覧履歴・未読あり一覧の貼り付けから）
       //   workId -> { url, title, unread, total, checked }。複数回貼り付けても workId で重複しない。
       var seedCandidates = {};
+
+      // カクヨムの閲覧履歴・未読あり一覧のページで実行する抽出ロジック。
+      //   この画面（カクヨム取得コンソール）では呼ばない。document 構造が違うので何も見つからず、
+      //   空の一覧が出るだけ（実害はない）。関数の中身は Function.prototype.toString() で取り出して
+      //   ブックマークレット（javascript: リンク）を組み立てるためだけに使う（下の buildSeedBookmarklet_）。
+      //   同じ処理を kaku_scraping/tools/extract_antenna_list.js にも置いている
+      //   （コンソールに直接貼り付けたい場合用）。ロジックを変えたら両方直すこと。
+      function kakuyomuExtractCandidates_() {
+        var items = [];
+        document.querySelectorAll('.widget-antennaList-item').forEach(function (li) {
+          var link = li.querySelector('.widget-antennaList-workInfo');
+          var titleEl = li.querySelector('.widget-antennaList-title');
+          if (!link || !titleEl) return;
+          var href = link.getAttribute('href') || '';
+          var m = href.match(/\/works\/(\d+)/);
+          if (!m) return;
+
+          var unread = null, total = null;
+          li.querySelectorAll('.widget-antennaList-event li').forEach(function (ev) {
+            var t = ev.textContent || '';
+            var mu = t.match(/未読(\d+)話/);
+            if (mu) unread = Number(mu[1]);
+            var mt = t.match(/(?:連載中|完結済)([\d,]+)話/);
+            if (mt) total = Number(mt[1].replace(/,/g, ''));
+          });
+
+          items.push({
+            url:   'https://kakuyomu.jp/works/' + m[1],
+            title: titleEl.textContent.trim(),
+            unread: unread,
+            total:  total,
+          });
+        });
+
+        window.prompt(
+          items.length + ' 件見つかりました。全選択（Ctrl+A / Cmd+A）してコピーし、' +
+          'カクヨム取得コンソールの「候補から選んで登録」欄に貼り付けてください。',
+          JSON.stringify(items)
+        );
+      }
+
+      // 上の関数のソースそのものを javascript: リンクにする（ブックマークバーへドラッグして使う）
+      function buildSeedBookmarklet_() {
+        return 'javascript:' + encodeURIComponent('(' + kakuyomuExtractCandidates_.toString() + ')();');
+      }
 
       // まだサイズを知らない docId だけをまとめて問い合わせる（主にページ読込時）。
       //   次話の問い合わせが進行中の作品は飛ばす（次話の判定結果にサイズも同梱されるため。
@@ -789,6 +850,9 @@
             th.onclick = function () { setSort(th.getAttribute('data-key')); };
           })(ths[i]);
         }
+
+        var bm = $('seedBookmarklet');
+        if (bm) bm.href = buildSeedBookmarklet_();
 
         refresh(); // 応答時に scheduleNextRefresh が呼ばれ、以降は自走する
         google.script.run.withSuccessHandler(renderLinks).webGetLinks();

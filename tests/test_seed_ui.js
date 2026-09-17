@@ -66,6 +66,13 @@ g('renderSeedList()');
 // ここでは例外なく再描画できること・候補データ自体が消えないことだけを確認する。
 check('候補は消えない（登録済みでも一覧には残す）', g('Object.keys(seedCandidates).length'), 3);
 
+section('ブックマークレット: 抽出ロジックの関数から javascript: リンクを組み立てる');
+const bm = g('buildSeedBookmarklet_()');
+check('javascript: で始まる', bm.indexOf('javascript:') === 0, true);
+const decoded = decodeURIComponent(bm.slice('javascript:'.length));
+check('カクヨムのページで作品一覧を集めるロジックが入っている', decoded.indexOf('widget-antennaList-item') >= 0, true);
+check('即時実行の形になっている（末尾が )(); ）', decoded.slice(-4), ')();');
+
 section('一括処理の進捗表示: batchKind によって文言が変わる');
 const base = { works: [], queueCount: 0, shortFilename: true, lastBatchResult: '' };
 const run = r => Object.assign({}, base, {
