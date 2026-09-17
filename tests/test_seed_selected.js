@@ -41,6 +41,17 @@ check('索引シートが更新される（登録ぶんをまとめて1回）', 
 section('登録後は続き取得の対象になる（既読分の次から新着扱いで拾える）');
 const r2 = g('webStartContinuation("https://kakuyomu.jp/works/111")');
 check('続き取得: 8〜10話が新着として検出される', [r2.ok, props.CONT_FROM, props.CONT_TO], [true, '8', '10']);
+check('DOC_IDS はまだ空（選択登録では本文もドキュメントも作っていない）', props.DOC_IDS, '[]');
+
+// 選択登録はドキュメントを作らない（目次だけ）ので、既存 docIds が空のまま続き取得に
+// 入ったときに、本当にドキュメントが作られるところまで確認する（resolveBuildTarget_ が
+// 「追記できる既存ドキュメントが無い→新規作成」に正しく倒れることの実地確認）。
+let threw2 = null;
+try { g('continuesFetch()'); } catch (e) { threw2 = String(e); }
+check('続き取得の実行でエラーにならない', threw2, null);
+check('ドキュメントが1冊作られる', state.createdDocs, 1);
+const rec111After = JSON.parse(props.RESUME_111);
+check('記録: 10話・docIds 1件に更新される', [rec111After.total, rec111After.docIds.length], [10, 1]);
 
 section('無効な URL は無視され、全滅なら ok:false');
 const r3 = g('webSeedSelected([{ url: "not-a-url" }, { url: "" }])');
