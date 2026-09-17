@@ -106,8 +106,8 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 
 - **相談と実装を分ける**: ユーザーが分析・提案・意見を求めている段階では実装に進まない。現状・方針・トレードオフを提示し、明示的な許可を得てから着手する。**コードのロジックに関わる変更は事前承認が必要**。ドキュメント更新と、承認済み方針の範囲内の軽微な修正は確認不要。
 - **作業前に `git fetch origin main` で最新を取り込む**(`sync-from-gas.yml` が毎日 GAS 側の編集を取り込み、コミットを作ることがある)。ブランチは `main` に直接コミットする運用。
-- **検証**: GAS はローカル実行不可。編集後は必ず `node --check`(`.js` はそのまま。`index.html` は `<script>` 部を抜き出して)を通し、ロジックは Node の `vm` で GAS API をモックしたシミュレーションで確認する(スクラッチ領域に置く。リポジトリには入れない)。実機確認はユーザーが `/dev` を再読み込みして行う。
-- **反映の手順**: コミット → `git push -u origin main` → GitHub Actions `deploy.yml` を `workflow_dispatch` で起動(`clasp push`)。push のたびに必ずトリガーする。完了後にユーザーへ「何を変えたか・どう検証したか・何を確認してほしいか」を簡潔に報告する。
+- **検証**(`/verify`): GAS はローカル実行不可。編集後は必ず `npm test`(`tests/run.js`。全 `.js` と `index.html` の `<script>` 部の `node --check` + `tests/test_*.js` の模擬実行)を通す。模擬実行は Node の `vm` に `tests/harness/gas-mock.js`(GAS API)/ `tests/harness/dom-mock.js`(DOM)でソースを読み込む方式。**新しい挙動には `tests/` に回帰テストを足す**(戻してはいけない設計判断との対応表は `.claude/skills/verify/SKILL.md`)。使い捨ての実験だけスクラッチ領域に置く。`tests/` と `.claude/` は clasp の `rootDir` 外なので GAS には同期されない。実機確認はユーザーが `/dev` を再読み込みして行う。
+- **反映の手順**(`/release`): コミット → `git push -u origin main` → GitHub Actions `deploy.yml` を `workflow_dispatch` で起動(`clasp push`)→ 実行結果が success であることを確認。`kaku_scraping/src` を変えた push では必ずトリガーする(ドキュメント・テストだけなら不要)。完了後にユーザーへ「何を変えたか・どう検証したか・何を確認してほしいか」を簡潔に報告する。手順の詳細(使う MCP ツール名、失敗時の見方)は `.claude/skills/release/SKILL.md`。
 - 削除した定数・関数・フェーズ名は**残存参照を grep で確認**する。コメントも実装と食い違わせない(過去に旧列構成・旧フォント名の記述が残って事故のもとになった)。
 - マニフェスト(`appsscript.json`)を変えたら再認可が必要になる旨をユーザーに伝える。
 

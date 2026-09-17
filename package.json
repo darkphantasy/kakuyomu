@@ -4,6 +4,7 @@
   "private": true,
   "description": "カクヨム関連の Google Apps Script を clasp で管理",
   "scripts": {
+    "test": "node tests/run.js",
     "pull": "cd kaku_scraping && clasp pull",
     "push": "cd kaku_scraping && clasp push",
     "open": "cd kaku_scraping && clasp open",
