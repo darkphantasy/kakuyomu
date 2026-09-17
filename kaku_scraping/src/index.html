@@ -163,7 +163,7 @@
           下のリンクをブラウザの<b>ブックマークバーへドラッグ</b>してください。カクヨムの
           「<a href="https://kakuyomu.jp/my/antenna/reading_histories" target="_blank">閲覧履歴</a>」または
           「<a href="https://kakuyomu.jp/my/antenna/works?serial_status=all" target="_blank">未読あり</a>」を開いた状態でそのブックマークをクリックすると、
-          作品一覧（URL・タイトル・未読話数・全話数）が JSON でダイアログに表示されます。全選択（Ctrl+A / Cmd+A）してコピーし、下の欄に貼り付けてください。
+          新しいタブが開き、作品一覧（URL・タイトル・未読話数・全話数）の JSON が全選択された状態で表示されます。コピー（Ctrl+C / Cmd+C）して、下の欄に貼り付けてください。
         </p>
         <p>
           <a id="seedBookmarklet" class="bookmarklet" href="#" title="ここをブックマークバーへドラッグ（クリックすると動作確認だけできます）" onclick="return runBookmarkletHere()">📥 カクヨム作品一覧を抽出</a>
@@ -284,11 +284,34 @@
             return;
           }
 
-          window.prompt(
-            items.length + ' 件見つかりました。全選択（Ctrl+A / Cmd+A）してコピーし、' +
-            'カクヨム取得コンソールの「候補から選んで登録」欄に貼り付けてください。',
-            JSON.stringify(items)
-          );
+          // window.prompt() は使わない。長い文字列だと環境によって表示・コピーの
+          // 途中で切れることがあり、貼り付け先で JSON.parse に失敗する（原因が
+          // 分かりにくい）。新しいタブに <textarea> を出して全選択した状態で渡す。
+          var json = JSON.stringify(items);
+          var w = window.open('', '_blank');
+          if (!w) {
+            window.prompt(
+              items.length + ' 件見つかりました（ポップアップがブロックされたため代替表示）。' +
+              '全選択（Ctrl+A / Cmd+A）してコピーしてください。',
+              json
+            );
+            return;
+          }
+          w.document.title = 'カクヨム抽出結果';
+          var p = w.document.createElement('p');
+          p.textContent = items.length + ' 件見つかりました。下のテキストは全選択済みです。' +
+            'コピー（Ctrl+C / Cmd+C）して、カクヨム取得コンソールの「候補から選んで登録」欄に貼り付けてください。';
+          var ta = w.document.createElement('textarea');
+          ta.value = json;
+          ta.readOnly = true;
+          ta.style.width = '100%';
+          ta.style.height = '80vh';
+          ta.style.boxSizing = 'border-box';
+          ta.style.fontFamily = 'monospace';
+          w.document.body.appendChild(p);
+          w.document.body.appendChild(ta);
+          ta.focus();
+          ta.select();
         } catch (e) {
           alert('抽出に失敗しました。この内容を報告してください:\n' + (e && e.message ? e.message : e));
         }

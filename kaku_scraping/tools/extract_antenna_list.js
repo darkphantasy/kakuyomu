@@ -13,8 +13,8 @@
 //      どちらも同じ widget-antennaList 系のマークアップを使っているため、このスクリプトは
 //      どちらのページでもそのまま動く。
 //   2. 開発者ツール（F12 など）のコンソールタブにこのファイルの中身を貼り付けて実行する。
-//   3. ダイアログに表示された JSON を全選択・コピーし、カクヨム取得コンソールの
-//      「候補から選んで登録」欄に貼り付けて「読み込み」を押す。
+//   3. 新しいタブが開き、抽出結果の JSON が全選択された状態のテキストエリアが出る。
+//      コピーして、カクヨム取得コンソールの「候補から選んで登録」欄に貼り付けて「読み込み」を押す。
 //   4. 一覧はページ送り（?page=2 など）されている場合があるので、必要なページごとに
 //      繰り返し実行して貼り付ける（貼り付けは作品ID単位で重複しないよう自動でまとめられる）。
 //
@@ -56,11 +56,34 @@
     if (items.length === 0) {
       alert('作品が見つかりませんでした。カクヨムの閲覧履歴・未読あり一覧のページで実行してください。');
     } else {
-      window.prompt(
-        items.length + ' 件見つかりました。全選択（Ctrl+A / Cmd+A）してコピーし、' +
-        'カクヨム取得コンソールの「候補から選んで登録」欄に貼り付けてください。',
-        JSON.stringify(items)
-      );
+      // window.prompt() は使わない。長い文字列だと環境によって表示・コピーの途中で
+      // 切れることがあり、貼り付け先で JSON.parse に失敗する（原因が分かりにくい）。
+      // 新しいタブに <textarea> を出して全選択した状態で渡す。
+      var json = JSON.stringify(items);
+      var w = window.open('', '_blank');
+      if (!w) {
+        window.prompt(
+          items.length + ' 件見つかりました（ポップアップがブロックされたため代替表示）。' +
+          '全選択（Ctrl+A / Cmd+A）してコピーしてください。',
+          json
+        );
+      } else {
+        w.document.title = 'カクヨム抽出結果';
+        var p = w.document.createElement('p');
+        p.textContent = items.length + ' 件見つかりました。下のテキストは全選択済みです。' +
+          'コピー（Ctrl+C / Cmd+C）して、カクヨム取得コンソールの「候補から選んで登録」欄に貼り付けてください。';
+        var ta = w.document.createElement('textarea');
+        ta.value = json;
+        ta.readOnly = true;
+        ta.style.width = '100%';
+        ta.style.height = '80vh';
+        ta.style.boxSizing = 'border-box';
+        ta.style.fontFamily = 'monospace';
+        w.document.body.appendChild(p);
+        w.document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+      }
     }
   } catch (e) {
     alert('抽出に失敗しました。この内容を報告してください:\n' + (e && e.message ? e.message : e));
