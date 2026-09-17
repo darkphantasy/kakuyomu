@@ -22,7 +22,7 @@ function makeItem(workId, title, eventTexts) {
   };
 }
 
-function runRaw(items) {
+function runRaw(items, expr) {
   let promptArgs = null;
   const alerts = [];
   const sandbox = {
@@ -40,8 +40,8 @@ function runRaw(items) {
   };
   vm.createContext(sandbox);
   vm.runInContext(script, sandbox, { filename: 'index.html' });
-  vm.runInContext('kakuyomuExtractCandidates_()', sandbox);
-  return { promptArgs, alerts };
+  const value = vm.runInContext(expr || 'kakuyomuExtractCandidates_()', sandbox);
+  return { promptArgs, alerts, value };
 }
 
 function run(items) {
@@ -78,5 +78,13 @@ const badItem = { querySelector() { throw new Error('模擬エラー'); }, query
 const r5 = runRaw([badItem]);
 check('prompt は呼ばれない', r5.promptArgs, null);
 check('alert にエラー内容が出る', r5.alerts.length === 1 && r5.alerts[0].indexOf('模擬エラー') >= 0, true);
+
+section('この画面でリンクを押したときは動作確認として同じ処理をその場で実行する');
+// GAS の Web アプリは iframe の中で動くため、リンクを踏んでも javascript: は実行されない。
+// クリックを握りつぶすと「押しても何も起きない」ため、代わりに関数をその場で呼んで結果を見せる。
+const r6 = runRaw([], 'runBookmarkletHere()');
+check('false を返す（javascript: への遷移はさせない）', r6.value, false);
+check('カクヨムのページではないので「0 件」の警告が出る', r6.alerts.length, 1);
+check('その警告に実行ページの案内が含まれる', r6.alerts[0].indexOf('閲覧履歴') >= 0, true);
 
 finish();

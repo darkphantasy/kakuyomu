@@ -166,13 +166,23 @@
           作品一覧（URL・タイトル・未読話数・全話数）が JSON でダイアログに表示されます。全選択（Ctrl+A / Cmd+A）してコピーし、下の欄に貼り付けてください。
         </p>
         <p>
-          <a id="seedBookmarklet" class="bookmarklet" href="#" title="ここをブックマークバーへドラッグ" onclick="return false;">📥 カクヨム作品一覧を抽出</a>
+          <a id="seedBookmarklet" class="bookmarklet" href="#" title="ここをブックマークバーへドラッグ（クリックすると動作確認だけできます）" onclick="return runBookmarkletHere()">📥 カクヨム作品一覧を抽出</a>
+          <span style="font-size:12px;color:var(--muted);margin-left:8px">（この画面でクリックすると動作確認。カクヨムのページではないので「0 件」と出れば正常）</span>
         </p>
         <details>
-          <summary>ドラッグできない場合</summary>
-          <p style="font-size:12px;color:var(--muted)">
-            同じ処理を <code>kaku_scraping/tools/extract_antenna_list.js</code> としてリポジトリにも置いています。
-            カクヨムのページを開いた状態でブラウザの開発者ツール（コンソール）にその中身を貼り付けて実行しても、同じ結果が得られます。
+          <summary>ドラッグがうまくいかない場合（手動でブックマークを作る / コンソールに貼り付ける）</summary>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:4px">
+            <b>手動でブックマークを作る:</b> 下の「URLを全選択」を押して Ctrl+C（Cmd+C）でコピーし、
+            Chrome のブックマークマネージャ（Ctrl+Shift+O）→ 右上の「⋮」→「新しいブックマークを追加」で、
+            URL 欄にそのまま貼り付けてください（名前は任意）。ドラッグ＆ドロップを経由しないぶん確実です。
+          </p>
+          <textarea id="seedBookmarkletUrl" rows="3" readonly style="width:100%;font-family:monospace;font-size:11px;padding:8px;border:1px solid var(--line);border-radius:6px"></textarea>
+          <div class="btns" style="margin-top:6px">
+            <button class="mini" onclick="selectBookmarkletUrl()">URLを全選択</button>
+          </div>
+          <p style="font-size:12px;color:var(--muted);margin-top:10px">
+            <b>コンソールに貼り付ける:</b> 同じ処理を <code>kaku_scraping/tools/extract_antenna_list.js</code> としてリポジトリにも置いています。
+            カクヨムのページを開いた状態でブラウザの開発者ツール（F12）のコンソールにその中身を貼り付けて実行しても、同じ結果が得られます。
           </p>
         </details>
         <textarea id="seedPaste" rows="3" style="width:100%;font-family:monospace;font-size:12px;padding:8px;border:1px solid var(--line);border-radius:6px" placeholder='[{"url":"https://kakuyomu.jp/works/...","title":"...","unread":8,"total":305}, ...]'></textarea>
@@ -287,6 +297,28 @@
       // 上の関数のソースそのものを javascript: リンクにする（ブックマークバーへドラッグして使う）
       function buildSeedBookmarklet_() {
         return 'javascript:' + encodeURIComponent('(' + kakuyomuExtractCandidates_.toString() + ')();');
+      }
+
+      // この画面でリンクを押したときの動作確認。
+      //   javascript: への遷移はさせない（GAS の Web アプリは iframe の中で動くため、
+      //   リンクを踏んでも javascript: は実行されず「押しても何も起きない」ように見える）。
+      //   代わりに同じ関数をその場で呼ぶ。カクヨムのページではないので通常は「0 件」の
+      //   警告が出るが、それが出れば「リンクに仕込んだコードは生きている」と分かる。
+      function runBookmarkletHere() {
+        kakuyomuExtractCandidates_();
+        return false;
+      }
+
+      // ブックマークレットの URL をテキストエリアで全選択する（ドラッグせずに手動で
+      //   ブックマークを作りたいとき用。コピー自体はブラウザ任せ＝Ctrl+C）。
+      function selectBookmarkletUrl() {
+        var ta = $('seedBookmarkletUrl');
+        if (!ta) return;
+        ta.focus();
+        ta.select();
+        var copied = false;
+        try { copied = document.execCommand('copy'); } catch (e) { copied = false; }
+        log(copied ? 'ブックマークレットのURLをコピーしました。' : 'URLを全選択しました。Ctrl+C（Cmd+C）でコピーしてください。');
       }
 
       // まだサイズを知らない docId だけをまとめて問い合わせる（主にページ読込時）。
@@ -863,8 +895,11 @@
           })(ths[i]);
         }
 
+        var bookmarklet = buildSeedBookmarklet_();
         var bm = $('seedBookmarklet');
-        if (bm) bm.href = buildSeedBookmarklet_();
+        if (bm) bm.href = bookmarklet;                 // ドラッグしてブックマーク化する用
+        var bmUrl = $('seedBookmarkletUrl');
+        if (bmUrl) bmUrl.value = bookmarklet;          // 手動でブックマークを作る用（貼り付け元）
 
         refresh(); // 応答時に scheduleNextRefresh が呼ばれ、以降は自走する
         google.script.run.withSuccessHandler(renderLinks).webGetLinks();
