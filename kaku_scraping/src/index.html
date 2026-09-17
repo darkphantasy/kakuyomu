@@ -341,6 +341,7 @@
             setBusy(false);
             if (res && res.ok === false) log((okMsgPrefix || '') + (res.message || '失敗しました。'), true);
             else log((okMsgPrefix || '') + ((res && res.message) || '完了しました。'));
+            if (res && res.kick) kick();
             refresh();
           })
           .withFailureHandler(function (err) {
@@ -348,6 +349,20 @@
             log('サーバーエラー: ' + err.message, true);
           });
         runner[fnName].apply(runner, args || []);
+      }
+
+      // 開始直後の 1 枠目をサーバーで即時に走らせる（webStart* が kick:true を返したときだけ）。
+      //   GAS の after() トリガーは発火まで 1 分前後かかるため、待たずに continuesFetch を蹴る。
+      //   ボタンは無効化しない（busy を触らない）。応答は実行が一区切りするまで返らないが、
+      //   進捗は通常のポーリングで見える。失敗しても保険のトリガーが同じ処理を引き継ぐので
+      //   ログに残すだけにする。
+      function kick() {
+        google.script.run
+          .withSuccessHandler(function () {})
+          .withFailureHandler(function (err) {
+            log('即時実行に失敗（トリガーで再開します）: ' + err.message, true);
+          })
+          .webKick();
       }
 
       function refresh() {

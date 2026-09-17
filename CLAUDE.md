@@ -52,7 +52,7 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 
 操作パネル(スプレッドシート版)は廃止済み。`doGet` が `index.html` を返し、クライアントは `google.script.run` で `WebApp.js` の `web*` 関数を呼ぶ。**取得ロジック本体には手を入れず**、既存部品の組み合わせで実装する。
 
-- **即応起動**: `webStart*` は run 状態をセットして `ensureTriggerAfter(WEB_KICKOFF_DELAY_MS)` で短い遅延のトリガーを張り、即座に返す。実処理はトリガー実行が担う(開始まで最大 1 分前後の揺れ)。一括続き取得も同じで、**新着確認をリクエスト内で行わない**(戻してはいけない設計判断を参照)。
+- **即応起動**: `webStart*` は run 状態をセットして `ensureTriggerAfter(WEB_KICKOFF_DELAY_MS)` で短い遅延のトリガーを張り、即座に返す。一括続き取得も同じで、**新着確認をリクエスト内で行わない**(戻してはいけない設計判断を参照)。ただし GAS の `after()` トリガーは指定値に関わらず発火まで 1 分前後かかるので、**1 枠目はクライアントが蹴る**: `webStart*` が実際に開始したとき(キューに積んだだけのときは付けない)は `kick: true` を返し、`call()` の成功ハンドラが**ボタンを無効化しない別リクエスト**で `webKick()`(中身は `continuesFetch()`)を呼ぶ。トリガーは保険としてそのまま張る。両方動いても `LockService` が排他し、後から来た方は読み飛ばすか次のフェーズを拾う。蹴りの失敗はログに出すだけ(トリガーが引き継ぐ)。
 - **状態行の文言**(`render`): 待機中 / `新着を確認中… k / N 作品`(`PHASE=BATCH_NEXT`。`running.batchDone` / `batchTotal`)/ `実行中: 作品名（PHASE） d / t 話（k / N 作品目）`(一括の中の 1 作品。単発取得では末尾の括弧が付かない)。`lastBatchResult`(`BATCH_RESULT`)は**開いている間に値が変わったときだけ**ログ欄に 1 行出す(`seenBatchResult`。開いた時点の値は前回の結果なので出さない)。
 - **デプロイ**: `deploy.yml` は `clasp push` のみでデプロイ版数を更新しない。**テストデプロイの `/dev` URL は常に最新コード**で動くので、この運用では `/dev` を使う。`/exec` を使うには `clasp deploy` の追加が要る。マニフェストの `webapp` 設定と `HtmlService` は追加スコープ不要(再認可不要)。
 - **XSS**: 作品タイトル等の外部由来テキストは必ず `textContent` で描画する。`innerHTML` に流し込まない。

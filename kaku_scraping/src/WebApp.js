@@ -114,7 +114,7 @@ function webStartWork_(mode, url, startEpisode, endEpisode) {
   }
 
   ensureTriggerAfter(WEB_KICKOFF_DELAY_MS);
-  return { ok: true, message: '取得を開始しました。進捗はこの画面に自動反映されます。' };
+  return { ok: true, kick: true, message: '取得を開始しました。進捗はこの画面に自動反映されます。' };
 }
 
 function webStartFetch(url, startEpisode, endEpisode) {
@@ -143,7 +143,22 @@ function webStartContinuationAll() {
   // continuesFetch の BATCH_NEXT 分岐に任せる。進捗は webGetState の batchDone/batchTotal で見える。
   startBatch_(props, entries);
   ensureTriggerAfter(WEB_KICKOFF_DELAY_MS);
-  return { ok: true, message: `一括続き取得を開始しました。${entries.length} 作品の新着を順に確認します。` };
+  return { ok: true, kick: true, message: `一括続き取得を開始しました。${entries.length} 作品の新着を順に確認します。` };
+}
+
+// ==========================================
+// 即時実行の蹴り（kick）
+//   webStart* が kick:true を返したとき、クライアントがボタンを無効化しない別リクエストで
+//   これを呼ぶ。GAS の after() トリガーは指定値に関わらず発火まで 1 分前後かかるため、
+//   1 枠目だけをこのリクエストの中で走らせて動き出しを早める。
+//   ・処理内容はトリガー実行と同じ continuesFetch。5 分で自主中断し、以降はトリガーが継ぐ。
+//   ・webStart* が張った保険のトリガーはそのまま。両方動いても LockService が排他し、
+//     後から来た方は読み飛ばすか次のフェーズを拾う（いずれも従来どおりの動き）。
+//   ・実行はサーバー側で走るので、途中でタブを閉じても中断されない。
+// ==========================================
+function webKick() {
+  continuesFetch();
+  return { ok: true };
 }
 
 // ==========================================
