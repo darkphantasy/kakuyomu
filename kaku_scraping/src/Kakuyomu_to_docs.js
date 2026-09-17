@@ -47,6 +47,11 @@ const PHASE_BUILD    = 'BUILD';
 const PHASE_BATCH_NEXT = 'BATCH_NEXT';
 const PHASE_DONE     = 'DONE';
 
+// batchStartNext の結果
+const BATCH_STARTED   = 'started';   // 新着のある作品を見つけて run 状態をセットした（PHASE=FETCHING）
+const BATCH_EXHAUSTED = 'exhausted'; // キューを使い切った（新着のある作品は無かった）
+const BATCH_DEFERRED  = 'deferred';  // 時間切れ。トリガーを張り直したので次の実行枠で続きを確認する
+
 const INDEX_SHEET_NAME     = '【索引】カクヨム取得作品（表）';
 const INDEX_SHEET_TAB_NAME = '索引'; // 索引スプレッドシート内のシート（タブ）名
 
@@ -166,13 +171,48 @@ function isRunActive_(props) {
   return !!phase && phase !== PHASE_DONE;
 }
 
+// キューの末尾に積む（実行中に追加する用）。積んだ後のキュー長を返す。
+//   BATCH_TOTAL（この一括で確認する作品の総数。進捗表示の分母）も同時に増やす。
+function pushBatchQueue_(props, entries) {
+  const queue = JSON.parse(props.getProperty('BATCH_QUEUE') || '[]');
+  const total = Number(props.getProperty('BATCH_TOTAL') || 0);
+  entries.forEach(e => queue.push(e));
+  props.setProperties({
+    BATCH_MODE:  '1',
+    BATCH_QUEUE: JSON.stringify(queue),
+    BATCH_TOTAL: String(total + entries.length),
+  });
+  return queue.length;
+}
+
 // キューに1件積む。積んだ後のキュー長を返す。
 //   entry: {url, mode:'fetch'|'cont', startEpisode?, endEpisode?}
 function enqueueWork_(props, entry) {
-  const queue = JSON.parse(props.getProperty('BATCH_QUEUE') || '[]');
-  queue.push(entry);
-  props.setProperties({ BATCH_MODE: '1', BATCH_QUEUE: JSON.stringify(queue) });
-  return queue.length;
+  return pushBatchQueue_(props, [entry]);
+}
+
+// 何も動いていない状態から一括続き取得を始める。キューを新規に作り PHASE_BATCH_NEXT を立てる。
+//   ここでは新着確認をしない。確認と取得は continuesFetch の BATCH_NEXT 分岐が担う
+//   （リクエストの中で全作品の目次を取りに行くと、応答が返るまで Web UI が固まるため）。
+function startBatch_(props, entries) {
+  props.setProperties({
+    BATCH_MODE:    '1',
+    BATCH_QUEUE:   JSON.stringify(entries),
+    BATCH_TOTAL:   String(entries.length),
+    BATCH_FETCHED: '0',
+    PHASE:         PHASE_BATCH_NEXT,
+  });
+}
+
+// 一括続き取得の終了処理。結果を1行に残し（Web UI がログに出す）、キュー関連のプロパティを消す。
+function finishBatch_(props) {
+  const total   = Number(props.getProperty('BATCH_TOTAL')   || 0);
+  const fetched = Number(props.getProperty('BATCH_FETCHED') || 0);
+  const stamp   = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'HH:mm');
+  const result  = `一括続き取得 完了（${stamp}）: 確認 ${total} 作品・新着あり ${fetched} 作品`;
+  Logger.log(result);
+  props.setProperty('BATCH_RESULT', result);
+  ['BATCH_MODE', 'BATCH_QUEUE', 'BATCH_TOTAL', 'BATCH_FETCHED'].forEach(k => props.deleteProperty(k));
 }
 
 // キュー要素を正規化する。
@@ -180,12 +220,6 @@ function enqueueWork_(props, entry) {
 function normalizeQueueEntry_(item) {
   if (typeof item === 'string') return { workId: item, mode: 'cont' };
   return item || {};
-}
-
-// キューの中身を人が読める1行に（パネル表示用。件数のみ）
-function describeQueue_(props) {
-  const queue = JSON.parse(props.getProperty('BATCH_QUEUE') || '[]');
-  return queue.length === 0 ? '順番待ち: なし' : `順番待ち: ${queue.length} 件`;
 }
 
 // ==========================================
@@ -296,45 +330,40 @@ function startContinuationAll() {
 
   // 実行中なら全作品をキューの末尾に積むだけにする（現在の取得は止めない）
   if (isRunActive_(props)) {
-    const queue = JSON.parse(props.getProperty('BATCH_QUEUE') || '[]');
-    props.setProperties({
-      BATCH_MODE:  '1',
-      BATCH_QUEUE: JSON.stringify(queue.concat(entries)),
-    });
-    Logger.log(`実行中の取得があるため、${entries.length} 作品をキューに追加しました（順番待ち計 ${queue.length + entries.length} 件）。`);
+    const n = pushBatchQueue_(props, entries);
+    Logger.log(`実行中の取得があるため、${entries.length} 作品をキューに追加しました（順番待ち計 ${n} 件）。`);
     return;
   }
 
-  // PHASE を先に立ててから batchStartNext に入る（目次取得の間も「実行中」に見せるため。
-  // 理由は finishRun のバッチ分岐のコメントを参照）。
-  props.setProperties({ BATCH_MODE: '1', BATCH_QUEUE: JSON.stringify(entries), PHASE: PHASE_BATCH_NEXT });
-  Logger.log(`一括続き取得：${entries.length} 作品を順に処理します。`);
-
-  if (!batchStartNext(props)) {
-    props.deleteProperty('BATCH_MODE');
-    props.deleteProperty('BATCH_QUEUE');
-    props.deleteProperty('PHASE');
-    Logger.log('一括続き取得：新着のある作品はありませんでした。');
-    return;
-  }
-  continuesFetch(); // 先頭作品をすぐ開始
+  startBatch_(props, entries);
+  Logger.log(`一括続き取得：${entries.length} 作品の新着を順に確認します。`);
+  continuesFetch(); // BATCH_NEXT 分岐が新着確認〜取得を進める
 }
 
-// バッチキューから次の作品を取り出し、取得の準備をする。
-//   run 状態をセットできたら true（PHASE=FETCHING）。
-//   キューを使い切ったら false。トリガー管理は呼び出し側が行う。
+// バッチキューから次の作品を取り出し、取得の準備をする（新着確認）。
+//   呼ぶ前に PHASE を立てておくこと（目次取得の間も「実行中」に見せるため）。
+//   返り値: BATCH_STARTED（run 状態をセットした。PHASE=FETCHING）
+//           BATCH_EXHAUSTED（キューを使い切った）
+//           BATCH_DEFERRED（時間切れ。トリガーは張り直し済みで PHASE は変えない）
+//   キューは1作品取り出すごとに保存するので、途中で中断しても次回はその続きから確認できる。
 //   キュー要素は {url, mode:'fetch'|'cont', startEpisode?, endEpisode?}。
 //   旧形式（workId の文字列）も続き取得として受け付ける。
-function batchStartNext(props) {
+function batchStartNext(props, startTime) {
   let queue = JSON.parse(props.getProperty('BATCH_QUEUE') || '[]');
   while (queue.length > 0) {
+    if (typeof startTime === 'number' && Date.now() - startTime > TIMEOUT_THRESHOLD_MS) {
+      Logger.log(`⏳ 新着確認の途中で時間切れ（残り ${queue.length} 作品）。次の実行枠で続きを確認します。`);
+      ensureTriggerAfter();
+      return BATCH_DEFERRED;
+    }
+
     const entry = normalizeQueueEntry_(queue.shift());
-    props.setProperty('BATCH_QUEUE', JSON.stringify(queue));
+    props.setProperty('BATCH_QUEUE', JSON.stringify(queue)); // 進捗（確認済み件数）はここで進む
 
     if (entry.mode === 'fetch') {
       if (!entry.url) { Logger.log('URLなし、スキップ（初回取得）'); continue; }
       Logger.log(`▼ 次の作品（初回取得）: ${entry.url}`);
-      if (prepareFetch(entry.url, entry.startEpisode, entry.endEpisode)) return true;
+      if (prepareFetch(entry.url, entry.startEpisode, entry.endEpisode)) return markBatchStarted_(props);
       continue; // 準備できなければ次へ
     }
 
@@ -349,10 +378,16 @@ function batchStartNext(props) {
     if (!url) { Logger.log(`URL記録なし、スキップ: ${workId || '(不明)'}`); continue; }
 
     Logger.log(`▼ 次の作品: ${label}`);
-    if (prepareContinuation(url)) return true; // 新着あり → 次回 FETCHING
+    if (prepareContinuation(url)) return markBatchStarted_(props); // 新着あり → FETCHING
     // 新着なし → 次の作品へ
   }
-  return false;
+  return BATCH_EXHAUSTED;
+}
+
+// 新着のある作品が見つかった回数（結果表示用）を進める
+function markBatchStarted_(props) {
+  props.setProperty('BATCH_FETCHED', String(Number(props.getProperty('BATCH_FETCHED') || 0) + 1));
+  return BATCH_STARTED;
 }
 
 // 続き取得の準備（URL指定）。run 状態をセットしたら true、新着なし/失敗なら false。
@@ -827,16 +862,16 @@ function continuesFetch() {
     } else if (phase === PHASE_BUILD) {
       runBuildPhase(props, startTime);
     } else if (phase === PHASE_BATCH_NEXT) {
-      // 一括続き取得：次の作品を準備して取得開始（新しい実行枠で時間に余裕を持って）
-      if (batchStartNext(props)) {
+      // 一括続き取得：キューの作品を順に新着確認し、見つかればそのまま取得に入る
+      const result = batchStartNext(props, startTime);
+      if (result === BATCH_STARTED) {
         runFetchPhase(props, startTime);
-      } else {
-        props.deleteProperty('BATCH_MODE');
-        props.deleteProperty('BATCH_QUEUE');
+      } else if (result === BATCH_EXHAUSTED) {
+        finishBatch_(props);
         props.setProperty('PHASE', PHASE_DONE);
         deleteTrigger();
-        Logger.log('一括続き取得：全作品完了。');
       }
+      // BATCH_DEFERRED: トリガーは張り直し済み。PHASE は BATCH_NEXT のまま次回に続く
     } else if (phase === PHASE_DONE) {
       Logger.log('既に完了済みです。トリガーを削除します。');
       deleteTrigger();
@@ -1375,20 +1410,20 @@ function finishRun(props, workId, docIds, startTime) {
         (Date.now() - startTime < TIMEOUT_THRESHOLD_MS - 60 * 1000);
       if (canInline) {
         Logger.log(`次の作品へ直結（残り ${queue.length} 作品）。`);
-        if (batchStartNext(props)) { // 成功時は PHASE=FETCHING に置き換わる
+        const result = batchStartNext(props, startTime);
+        if (result === BATCH_STARTED) { // PHASE=FETCHING に置き換わっている
           runFetchPhase(props, startTime);
           return;
         }
-        // キューを使い切り、新着のある作品が無かった → そのまま完了処理へ（PHASE は下で DONE に）
+        if (result === BATCH_DEFERRED) return; // トリガー張り直し済み。PHASE は BATCH_NEXT のまま
+        // BATCH_EXHAUSTED: 新着のある作品が無かった → 下の完了処理へ（PHASE は DONE に）
       } else {
         ensureTriggerAfter();
         Logger.log(`次の作品へ（残り ${queue.length} 作品）。`);
         return;
       }
     }
-    props.deleteProperty('BATCH_MODE');
-    props.deleteProperty('BATCH_QUEUE');
-    Logger.log('一括続き取得：全作品完了。');
+    finishBatch_(props);
   }
 
   props.setProperty('PHASE', PHASE_DONE);
@@ -1721,6 +1756,8 @@ function checkProgress() {
   Logger.log(`DOC_IDS:           ${all.DOC_IDS}`);
   Logger.log(`BATCH_MODE:        ${all.BATCH_MODE}`);
   Logger.log(`BATCH_QUEUE:       ${all.BATCH_QUEUE}`);
+  Logger.log(`BATCH_TOTAL:       ${all.BATCH_TOTAL} （新着あり ${all.BATCH_FETCHED || 0}）`);
+  Logger.log(`BATCH_RESULT:      ${all.BATCH_RESULT}`);
 }
 
 function checkBufferContent() {
@@ -1769,8 +1806,7 @@ function resetAll() {
   }
 
   clearRunState(props); // run状態のみ消す。続き取得記録(RESUME)は残す
-  props.deleteProperty('BATCH_MODE');
-  props.deleteProperty('BATCH_QUEUE');
+  ['BATCH_MODE', 'BATCH_QUEUE', 'BATCH_TOTAL', 'BATCH_FETCHED'].forEach(k => props.deleteProperty(k));
   Logger.log('リセット完了（途中状態を消去）。startFetch / startContinuation を再実行してください。');
   Logger.log('※ 続き取得記録は保持しています。記録も消すなら clearResumeRecord を実行してください。');
 }

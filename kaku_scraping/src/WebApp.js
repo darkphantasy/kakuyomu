@@ -57,8 +57,9 @@ function webGetState() {
     })
     .sort(compareWorksForDisplay_); // 同分の作品が呼び出しごとに入れ替わらないよう決定的に並べる
 
-  const eps   = JSON.parse(all.EPISODES || '[]');
-  const queue = JSON.parse(all.BATCH_QUEUE || '[]');
+  const eps        = JSON.parse(all.EPISODES || '[]');
+  const queue      = JSON.parse(all.BATCH_QUEUE || '[]');
+  const batchTotal = Number(all.BATCH_TOTAL || 0);
 
   return {
     works: works,
@@ -69,9 +70,13 @@ function webGetState() {
       title:     all.TITLE || '',
       done:      Number(all.NEXT_INDEX || 0),
       total:     eps.length,
+      // 一括続き取得の進み具合（確認済み k / 全 N 作品）。キューから取り出した時点で k が進む
+      batchTotal: batchTotal,
+      batchDone:  batchTotal ? Math.max(0, batchTotal - queue.length) : 0,
     },
-    queueCount:    queue.length,
-    shortFilename: isShortFilenameEnabled_(),
+    queueCount:      queue.length,
+    lastBatchResult: all.BATCH_RESULT || '', // 直近の一括続き取得の結果（1行）
+    shortFilename:   isShortFilenameEnabled_(),
   };
 }
 
@@ -129,26 +134,16 @@ function webStartContinuationAll() {
   const entries = records.map(r => ({ workId: r.workId, mode: 'cont' }));
 
   if (isRunActive_(props)) {
-    const queue = JSON.parse(props.getProperty('BATCH_QUEUE') || '[]');
-    props.setProperties({
-      BATCH_MODE:  '1',
-      BATCH_QUEUE: JSON.stringify(queue.concat(entries)),
-    });
+    pushBatchQueue_(props, entries);
     return { ok: true, message: `実行中のため、${entries.length} 作品を順番待ちに追加しました。` };
   }
 
-  // PHASE を先に立ててから batchStartNext に入る（目次取得の間も「実行中」に見せるため。
-  // 理由は finishRun のバッチ分岐のコメントを参照）。
-  props.setProperties({ BATCH_MODE: '1', BATCH_QUEUE: JSON.stringify(entries), PHASE: PHASE_BATCH_NEXT });
-  if (!batchStartNext(props)) {
-    props.deleteProperty('BATCH_MODE');
-    props.deleteProperty('BATCH_QUEUE');
-    props.deleteProperty('PHASE');
-    return { ok: true, message: '新着のある作品はありませんでした。' };
-  }
-
+  // ここでは新着確認をしない（全作品の目次を取りに行くと応答が返るまで画面が固まる）。
+  // キューと PHASE_BATCH_NEXT を立ててトリガーを張るだけで即座に返し、確認〜取得は
+  // continuesFetch の BATCH_NEXT 分岐に任せる。進捗は webGetState の batchDone/batchTotal で見える。
+  startBatch_(props, entries);
   ensureTriggerAfter(WEB_KICKOFF_DELAY_MS);
-  return { ok: true, message: `一括続き取得を開始しました（${entries.length} 作品を確認）。` };
+  return { ok: true, message: `一括続き取得を開始しました。${entries.length} 作品の新着を順に確認します。` };
 }
 
 // ==========================================
@@ -198,8 +193,12 @@ function webClearQueue() {
   const queue = JSON.parse(props.getProperty('BATCH_QUEUE') || '[]');
   if (queue.length === 0) return { ok: true, message: '順番待ちはありません。' };
 
-  props.setProperty('BATCH_QUEUE', '[]');
-  if (!isRunActive_(props)) props.deleteProperty('BATCH_MODE');
+  // 取り消したぶんだけ分母（BATCH_TOTAL）も減らし、確認済み件数の表示がズレないようにする
+  const total = Number(props.getProperty('BATCH_TOTAL') || 0);
+  props.setProperties({ BATCH_QUEUE: '[]', BATCH_TOTAL: String(Math.max(0, total - queue.length)) });
+  if (!isRunActive_(props)) {
+    ['BATCH_MODE', 'BATCH_TOTAL', 'BATCH_FETCHED'].forEach(k => props.deleteProperty(k));
+  }
   return { ok: true, message: `順番待ち ${queue.length} 件を取り消しました（実行中の取得は継続します）。` };
 }
 

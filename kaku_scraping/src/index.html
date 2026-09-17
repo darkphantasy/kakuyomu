@@ -382,21 +382,36 @@
         }, delay);
       }
 
+      // 直近の一括続き取得の結果は、ページを開いている間に変わったときだけログに出す
+      //   （開いた時点の値は「前回の結果」なので繰り返し出さない）
+      var seenBatchResult = null;
+
       function render(s) {
         lastState = s;
         refreshChangedWorks(s.works);  // 完了した（updatedAtが変わった）作品を取り直す
         maybeFetchProgress(s.works);   // 次話を知らない作品を先に問い合わせる（サイズも一緒に返る）
         maybeFetchSizes(s.works);      // 次話の問い合わせでカバーされない docId だけ別途取りに行く
 
+        if (seenBatchResult === null) {
+          seenBatchResult = s.lastBatchResult || '';
+        } else if (s.lastBatchResult && s.lastBatchResult !== seenBatchResult) {
+          seenBatchResult = s.lastBatchResult;
+          log(s.lastBatchResult);
+        }
+
         var r = s.running;
+        var where = r.batchTotal ? '（' + r.batchDone + ' / ' + r.batchTotal + ' 作品目）' : '';
         $('dot').className = 'dot' + (r.active ? ' on' : '');
         if (!r.active) {
           $('runText').textContent = '待機中';
         } else if (r.batchNext) {
-          $('runText').textContent = '1作品完了。次の作品を準備中…';
+          // 一括続き取得の新着確認中（目次を順に取りに行っている）。作品が確定すると下の「実行中」に変わる
+          $('runText').textContent = r.batchTotal
+            ? '新着を確認中… ' + r.batchDone + ' / ' + r.batchTotal + ' 作品'
+            : '次の作品を準備中…';
         } else {
           var prog = r.total ? (' ' + r.done + ' / ' + r.total + ' 話') : '';
-          $('runText').textContent = '実行中: ' + (r.title || '(不明)') + '（' + r.phase + '）' + prog;
+          $('runText').textContent = '実行中: ' + (r.title || '(不明)') + '（' + r.phase + '）' + prog + where;
         }
         $('queueText').textContent = s.queueCount ? ('順番待ち ' + s.queueCount + ' 件') : '順番待ちなし';
         $('shortState').textContent = s.shortFilename ? 'ON' : 'OFF';
