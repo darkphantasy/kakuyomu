@@ -38,9 +38,9 @@
     var total = null;
     li.querySelectorAll('.widget-antennaList-event li').forEach(function (ev) {
       var t = ev.textContent || '';
-      var mu = t.match(/未読(\d+)話/);
+      var mu = t.match(/未読\s*(\d+)\s*話/);
       if (mu) unread = Number(mu[1]);
-      var mt = t.match(/(?:連載中|完結済)([\d,]+)話/);
+      var mt = t.match(/(?:連載中|完結済)\s*([\d,]+)\s*話/);
       if (mt) total = Number(mt[1].replace(/,/g, ''));
     });
 
