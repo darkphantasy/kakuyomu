@@ -68,7 +68,7 @@
 - 「一括続き取得」「索引と差分同期」「索引を再生成」「順番待ちのクリア」「ファイル名短縮 ON/OFF」
 - 実行中の作品・フェーズ・進捗話数・順番待ち件数の表示(自動更新)。一括続き取得中は「新着を確認中… k / N 作品」と確認の進み具合が見え、終了時に結果 1 行がログ欄に出る
 
-取得開始ボタンは**すぐに応答します**(内部では run 状態をセットしてトリガーを張るだけで、実際の取得はトリガー実行が担当するため)。GASのトリガーは発火に揺れがあるので、実処理の開始は最大1分前後遅れることがあります。
+取得開始ボタンは**すぐに応答します**(内部では run 状態をセットしてトリガーを張るだけ)。応答直後に画面がサーバーへ「最初の 1 枠を今すぐ動かす」指示を別途送るため、実処理は数秒以内に始まります。GAS の実行時間上限で区切られた 2 枠目以降はトリガーが再開を担い、発火に 1 分前後の揺れがあります。
 
 ### 実行の自動継続・安全策
 
@@ -188,31 +188,45 @@ npm run open     # ブラウザで GAS エディタを開く
 
 ## Claude Code でコードを修正する場合
 
-このプロジェクトの設計判断・制約(OOM を避ける読み出し方法、cursor の扱い、書式仕様など)は [`CLAUDE.md`](CLAUDE.md) にまとめてあります。Claude Code はこのファイルを自動で読み込むため、修正を依頼する際に毎回説明し直す必要はありません。
+このプロジェクトの設計判断・制約(OOM を避ける読み出し方法、cursor の扱い、書式仕様、過去の不具合と再発防止策など)は [`CLAUDE.md`](CLAUDE.md) にまとめてあります。Claude Code はこのファイルを自動で読み込むため、修正を依頼する際に毎回説明し直す必要はありません。
 
-開発ループ:
+開発ループ(`main` に直接コミットする運用。PR は作らない):
 
-1. Claude Code に修正を依頼する
-2. 編集後、構文チェックを実行(`node --check kaku_scraping/src/Kakuyomu_to_docs.js`)
-3. ブランチに commit・push → PR を作成 → 差分を確認して `main` にマージ
-4. マージ後、GitHub の **Actions タブ → 「Deploy to Google Apps Script」→ Run workflow** で GAS に反映
-5. GAS エディタで対象関数(`startFetch` 等)を実行し、実行ログを確認
-6. 問題があればログを Claude Code に貼って次の修正へ
+1. Claude Code に相談・修正を依頼する。ロジックに関わる変更は、分析と提案を受けてから「実装を許可します」と伝える
+2. Claude Code が編集後に `/verify`(`npm test`)を回す。構文チェックと、`tests/` にある回帰テスト(GAS API と DOM を Node 上でモックした模擬実行)が一括で走る。新しい挙動には回帰テストが追加される
+3. Claude Code が `/release` で `main` にコミット・push し、GitHub Actions **「Deploy to Google Apps Script」** を起動して結果を確認し、「何を変えたか・どう検証したか・何を確認してほしいか」を報告する
+4. `/dev` の Web 画面を再読み込みして実機で確認する(GAS はローカルで動かせないので、実機確認は人が行う)
+5. 問題があれば、画面のログ欄の文言や GAS エディタの `checkProgress` の出力を Claude Code に貼って次の修正へ
 
-GAS エディタ側で直接編集した内容は `sync-from-gas.yml` が毎日自動で `main` に取り込むため、Claude Code で作業を始める前に `git pull` して最新化しておくこと。
+手元で検証だけ行うこともできます(Node.js が入っていれば `npm install` は不要):
+
+```bash
+npm test                       # 構文チェック + tests/test_*.js 全部
+node tests/run.js batch kick   # ファイル名で絞り込み
+```
+
+GAS エディタ側で直接編集した内容は `sync-from-gas.yml` が毎日自動で `main` に取り込みます。Claude Code は作業前に `git fetch origin main` で最新化します。
 
 ## ディレクトリ構成
 
 ```
 .
 ├── kaku_scraping/
-│   ├── .clasp.json           # スクリプトID設定
+│   ├── .clasp.json           # スクリプトID設定（rootDir は src。これより外は GAS に同期されない）
 │   └── src/
 │       ├── appsscript.json   # GASマニフェスト
 │       ├── Kakuyomu_to_docs.js   # 本体（取得・整形パイプライン）
 │       ├── WebApp.js             # Webインターフェース（サーバー側）
 │       ├── index.html            # Webインターフェース（画面）
 │       └── Reformat_existing_docs.js
+├── tests/
+│   ├── run.js                # npm test の入口（構文チェック + 全テスト集計）
+│   ├── harness/              # GAS API / DOM のモックと共通アサーション
+│   └── test_*.js             # 回帰テスト（設計判断の再発防止）
+├── .claude/skills/
+│   ├── verify/SKILL.md       # 検証手順（Claude Code の /verify）
+│   └── release/SKILL.md      # 反映手順（Claude Code の /release）
+├── CLAUDE.md                 # 設計判断・制約・開発ワークフロー（Claude Code が自動で読む）
 └── .github/workflows/
     ├── sync-from-gas.yml     # GAS → GitHub 自動同期(毎日)
     └── deploy.yml            # GitHub → GAS 反映(手動)
