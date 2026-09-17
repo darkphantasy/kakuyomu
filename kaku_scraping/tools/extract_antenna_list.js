@@ -8,7 +8,7 @@
 //
 // 使い方:
 //   1. ログイン状態のブラウザで以下のいずれかを開く
-//        https://kakuyomu.jp/my/reading_histories                       （閲覧履歴）
+//        https://kakuyomu.jp/my/antenna/reading_histories                （閲覧履歴）
 //        https://kakuyomu.jp/my/antenna/works?serial_status=all         （未読あり。フォロー中のみ）
 //      どちらも同じ widget-antennaList 系のマークアップを使っているため、このスクリプトは
 //      どちらのページでもそのまま動く。
@@ -24,38 +24,45 @@
 //   unread … 未読話数（カクヨム側の表示をそのまま使う。無ければ null）
 //   total  … 全話数（連載中/完結済の話数。無ければ null）
 (function () {
-  var items = [];
-  document.querySelectorAll('.widget-antennaList-item').forEach(function (li) {
-    var link = li.querySelector('.widget-antennaList-workInfo');
-    var titleEl = li.querySelector('.widget-antennaList-title');
-    if (!link || !titleEl) return;
+  try {
+    var items = [];
+    document.querySelectorAll('.widget-antennaList-item').forEach(function (li) {
+      var link = li.querySelector('.widget-antennaList-workInfo');
+      var titleEl = li.querySelector('.widget-antennaList-title');
+      if (!link || !titleEl) return;
 
-    var href = link.getAttribute('href') || '';
-    var m = href.match(/\/works\/(\d+)/);
-    if (!m) return;
+      var href = link.getAttribute('href') || '';
+      var m = href.match(/\/works\/(\d+)/);
+      if (!m) return;
 
-    var unread = null;
-    var total = null;
-    li.querySelectorAll('.widget-antennaList-event li').forEach(function (ev) {
-      var t = ev.textContent || '';
-      var mu = t.match(/未読\s*(\d+)\s*話/);
-      if (mu) unread = Number(mu[1]);
-      var mt = t.match(/(?:連載中|完結済)\s*([\d,]+)\s*話/);
-      if (mt) total = Number(mt[1].replace(/,/g, ''));
+      var unread = null;
+      var total = null;
+      li.querySelectorAll('.widget-antennaList-event li').forEach(function (ev) {
+        var t = ev.textContent || '';
+        var mu = t.match(/未読\s*(\d+)\s*話/);
+        if (mu) unread = Number(mu[1]);
+        var mt = t.match(/(?:連載中|完結済)\s*([\d,]+)\s*話/);
+        if (mt) total = Number(mt[1].replace(/,/g, ''));
+      });
+
+      items.push({
+        url:   'https://kakuyomu.jp/works/' + m[1],
+        title: titleEl.textContent.trim(),
+        unread: unread,
+        total:  total,
+      });
     });
 
-    items.push({
-      url:   'https://kakuyomu.jp/works/' + m[1],
-      title: titleEl.textContent.trim(),
-      unread: unread,
-      total:  total,
-    });
-  });
-
-  var json = JSON.stringify(items);
-  window.prompt(
-    items.length + ' 件見つかりました。全選択（Ctrl+A / Cmd+A）してコピーし、' +
-    'カクヨム取得コンソールの「候補から選んで登録」欄に貼り付けてください。',
-    json
-  );
+    if (items.length === 0) {
+      alert('作品が見つかりませんでした。カクヨムの閲覧履歴・未読あり一覧のページで実行してください。');
+    } else {
+      window.prompt(
+        items.length + ' 件見つかりました。全選択（Ctrl+A / Cmd+A）してコピーし、' +
+        'カクヨム取得コンソールの「候補から選んで登録」欄に貼り付けてください。',
+        JSON.stringify(items)
+      );
+    }
+  } catch (e) {
+    alert('抽出に失敗しました。この内容を報告してください:\n' + (e && e.message ? e.message : e));
+  }
 })();
