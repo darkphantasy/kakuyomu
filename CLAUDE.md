@@ -22,11 +22,16 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 - `appsscript.json` … マニフェスト(Docs API 有効化・OAuth スコープ・`webapp` 設定)
 - `Reformat_existing_docs.js` … 独立ツール。既存ドキュメントに現在の書式だけを再適用する。`TARGET_DOC_IDS` は使うたびに書き、使い終わったら空に戻す
 
+`kaku_scraping/tools/` は `rootDir`(`src`)の外なので GAS には同期されない。ブラウザ側で使う補助スクリプト置き場。
+
+- `extract_antenna_list.js` … カクヨムの閲覧履歴・未読あり一覧のページでブラウザのコンソールに貼り付けて実行し、作品一覧(URL・タイトル・未読話数・全話数)を JSON で抽出する(選択登録で使う)
+
 ## 用語
 
 - **記録** … Script Properties の `RESUME_<workId>`。作品ごとの永続状態(正のデータ)。索引シートはここから生成される表示物
 - **run** … 1 回の取得実行(FETCHING→BUILD→完了)。状態は `RUN_STATE_KEYS` のプロパティ群
 - **一括続き取得** … 全記録をキューに積んで 1 作品ずつ続き取得すること
+- **選択登録** … カクヨムの閲覧履歴・未読あり一覧から選んだ作品をまとめて一覧に追加すること(後述)
 - **話数** … 作品の総話数(記録の `total`)。**次話** … 読み残しの最前線の話番号(Web UI の列。後述)
 - **フェーズ機械** … Script Property `PHASE`(FETCHING / BUILD / BATCH_NEXT / DONE)で進行段階を表し、`continuesFetch()` が現在の `PHASE` に応じた処理へ振り分ける仕組み。ユーザーとの会話では「状態機械」ではなくこの語を使う
 - **蹴り(kick)** … Web UI が開始直後に `webKick()` を呼び、トリガーの発火を待たずに 1 枠目を走らせること(後述)
@@ -54,8 +59,9 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 - **FETCHING**(`runFetchPhase`): 目次から全話 URL を集め、`UrlFetchApp.fetchAll` で `FETCH_PARALLEL` 件ずつ取得。`EPISODES_PER_BUFFER`(50)話ごとにバッファ `__kakuyomu_buf_<workId>_NNNN.txt` へ書き出す。タイトル行は `■ <話タイトル> [通し番号]`(最低 3 桁ゼロ詰め、4 桁以上は自動拡張。`ep.no` に絶対話数)。
 - **BUILD**(`runBuildPhase`): バッファごとに `parseBufferForBuild` で ■ 除去・空行除去・字下げ正規化したクリーンテキストと見出し位置を作り、`insertCleanIntoDoc` が 1 回の `batchUpdate` で挿入+整形。`parsed.clean` は先頭・末尾に改行を持たないので、**同一ドキュメント内でバッファをまたぐ時は `needSep`(Script Property `BUILD_NEED_SEP`、タイムアウト再開をまたいで永続)で区切りの `\n` を 1 つ補う**(無いと前バッファ末尾と次の見出しが同一段落に連結する)。`MAX_DOC_CHARS`(90 万)超過で新規分冊(`HEADER_GUARD_CHARS` でヘッダのみ分冊の無限ループを防止)。最後にフッター(取得記録)を挿入。再開時は必ず実終端を読み直す。
 - **続き取得**(`prepareContinuation`): 記録の `lastEpisodeId` を現目次と照合して差分だけ取得(無ければ話数フォールバック)。既存末尾ドキュメントへ追記。追記境界に `\n\n` を先に挿入する。
-- **一括続き取得**(`startContinuationAll` / `webStartContinuationAll`): 全記録をキューに積み 1 作品ずつ完走→次へ。新着なしはスキップ。記録が 1 件も無ければ索引シートから復元(`rebuildRecordsFromSheet`)してから回す。**開始側は `startBatch_` でキュー・`BATCH_TOTAL`・`PHASE_BATCH_NEXT` を立てて即座に返すだけ**で、新着確認(目次取得)はしない。確認〜取得は `continuesFetch` の `BATCH_NEXT` 分岐が `batchStartNext(props, startTime)` で行う。返り値は 3 値: `BATCH_STARTED`(新着ありの作品で run 状態をセット済み→そのまま `runFetchPhase`)/ `BATCH_EXHAUSTED`(キューを使い切った→`finishBatch_` して DONE)/ `BATCH_DEFERRED`(確認の途中で `TIMEOUT_THRESHOLD_MS` 超過。トリガー張り直し済みで `PHASE` は `BATCH_NEXT` のまま。次の実行枠で続きから確認)。キューは 1 作品取り出すごとに保存するので、中断してもやり直しにならない。`finishBatch_` は結果 1 行(`一括続き取得 完了（HH:MM）: 確認 N 作品・新着あり M 作品`)を `BATCH_RESULT` に残し、`BATCH_MODE/QUEUE/TOTAL/FETCHED` を消す。
-- **自動キューイング**: run は単一スロットで同時実行不可。`startFetch` / `startContinuation` / `startContinuationAll` は実行中なら**エラーにせず `enqueueWork_`(実体は `pushBatchQueue_`)でキュー末尾に積む**(`BATCH_MODE='1'` を立て、`BATCH_TOTAL` も積んだ件数だけ増やす)。完了時は `finishRun` のバッチ分岐が次を取り出す。キュー要素は `{url, mode:'fetch'|'cont', startEpisode?, endEpisode?}`。旧形式(workId 文字列)も `normalizeQueueEntry_` が続き取得として受理する。`prepareFetch` / `prepareContinuation` は run 状態をセットして true を返すだけで、起動(`continuesFetch` かトリガー)は呼び出し側が行う。
+- **一括続き取得**(`startContinuationAll` / `webStartContinuationAll`): 全記録をキューに積み 1 作品ずつ完走→次へ。新着なしはスキップ。記録が 1 件も無ければ索引シートから復元(`rebuildRecordsFromSheet`)してから回す。**開始側は `startBatch_` でキュー・`BATCH_TOTAL`・`PHASE_BATCH_NEXT` を立てて即座に返すだけ**で、新着確認(目次取得)はしない。確認〜取得は `continuesFetch` の `BATCH_NEXT` 分岐が `batchStartNext(props, startTime)` で行う。返り値は 3 値: `BATCH_STARTED`(新着ありの作品で run 状態をセット済み→そのまま `runFetchPhase`)/ `BATCH_EXHAUSTED`(キューを使い切った→`finishBatch_` して DONE)/ `BATCH_DEFERRED`(確認の途中で `TIMEOUT_THRESHOLD_MS` 超過。トリガー張り直し済みで `PHASE` は `BATCH_NEXT` のまま。次の実行枠で続きから確認)。キューは 1 作品取り出すごとに保存するので、中断してもやり直しにならない。`finishBatch_` は結果 1 行(`一括続き取得 完了（HH:MM）: 確認 N 作品・新着あり M 作品`。選択登録ぶんがあれば末尾に`・登録 K 作品`を足す)を `BATCH_RESULT` に残し、`BATCH_MODE/KIND/QUEUE/TOTAL/FETCHED/SEEDED` を消す。
+- **選択登録**(`webSeedSelected`): カクヨムの閲覧履歴・未読あり一覧(`kaku_scraping/tools/extract_antenna_list.js` をブラウザのコンソールで実行して抽出)から選んだ作品をまとめて一覧に追加する。**一括続き取得と全く同じキュー(`BATCH_QUEUE`/`PHASE_BATCH_NEXT`/`batchStartNext`)を、要素の `mode:'seed'` で使い回す**(新しい状態機械を作らない)。`batchStartNext` は `mode:'seed'` のエントリを見つけると `seedResumeRecordAt_(url, [], readCount)` で目次だけ取得して記録を保存し(本文取得はしない)、run 状態はセットせず次のキュー項目へ進む(`fetch`/`cont` と違い `BATCH_STARTED` を返さない)。`readCount`(そこまでは取得済みとして記録する話数。カクヨム側の「全話数 − 未読話数」)を渡すと既読分を続き取得の対象から外せる。索引シートの更新は 1 件ごとではなく `finishBatch_` で 1 回だけ行う。`startBatch_` の第 3 引数 `kind`(`'cont'`(既定) / `'seed'`)は `BATCH_KIND` に入り、Web UI の進捗文言だけに使う。
+- **自動キューイング**: run は単一スロットで同時実行不可。`startFetch` / `startContinuation` / `startContinuationAll` / `webSeedSelected` は実行中なら**エラーにせず `enqueueWork_` または `pushBatchQueue_` でキュー末尾に積む**(`BATCH_MODE='1'` を立て、`BATCH_TOTAL` も積んだ件数だけ増やす)。完了時は `finishRun` のバッチ分岐が次を取り出す。キュー要素は `{url, mode:'fetch'|'cont'|'seed', startEpisode?, endEpisode?, readCount?}`。旧形式(workId 文字列)も `normalizeQueueEntry_` が続き取得として受理する。`prepareFetch` / `prepareContinuation` は run 状態をセットして true を返すだけで、起動(`continuesFetch` かトリガー)は呼び出し側が行う。
 - **完了処理**(`finishRun`): バッファ掃除 → 記録保存 → サイズキャッシュ無効化 → 索引シート再生成 → run 状態クリア → バッチなら次へ(残り 60 秒以上なら同一枠で `batchStartNext` を直結、足りなければトリガーに回す。直結の結果が `BATCH_DEFERRED` ならそのまま return、`BATCH_EXHAUSTED` なら `finishBatch_` して DONE)。**`clearRunState` で `PHASE` が消えるので、バッチを続ける場合は `batchStartNext` を呼ぶ前に必ず `PHASE_BATCH_NEXT` を立てる**(下記の再発防止を参照)。
 - **索引シート**(`updateIndexSpreadsheet`): 全記録から毎回再生成。列は「短縮作品名 / 作品タイトル / 話数 / ファイル数 / 最終更新 / 元URL / ファイル1..N」。短縮作品名は表示専用で、復元(`parseIndexSheetRow_`)には使わない。**列を増減させたら必ず `parseIndexSheetRow_` の列番号も直す**。並び順は `compareWorksForDisplay_`(索引・Web UI 共通。最終更新降順 → タイトル → 作品ID。`updatedAt` は分単位なので同値が普通に起き、タイブレークが無いと行が入れ替わる)。ID は `INDEX_SHEET_ID`、タブ名は `INDEX_SHEET_TAB_NAME`。索引シートは**記録の復旧手段**(`rebuildRecordsFromSheet` / `syncResumeRecordsFromSheet`)でもあるので廃止しない。
 - **ファイル名短縮**(`shortenTitleForFileName_`): `createBuildDoc` が Drive の**ファイル名にのみ**使う。本文見出し・記録・索引・フッターは常に正タイトル。ルールベース: ①「本題 〜サブタイトル〜」を除去(`〜` U+301C と `～` U+FF5E は別コードポイント。両対応)、②`【】［］（）` の注記を除去、③ `SHORT_FILENAME_MAX_LEN`(30)超なら読点区切り、無ければ機械的トリミング+「…」。既知の制約(不自然な切れ方・一意性低下)は許容済み。ON/OFF は Script Property `SHORT_FILENAME`(既定 ON)。
@@ -64,8 +70,9 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 
 操作パネル(スプレッドシート版)は廃止済み。`doGet` が `index.html` を返し、クライアントは `google.script.run` で `WebApp.js` の `web*` 関数を呼ぶ。**取得ロジック本体には手を入れず**、既存部品の組み合わせで実装する。
 
-- **即応起動**: `webStart*` は run 状態をセットして `ensureTriggerAfter(WEB_KICKOFF_DELAY_MS)` で短い遅延のトリガーを張り、即座に返す。一括続き取得も同じで、**新着確認をリクエスト内で行わない**(戻してはいけない設計判断を参照)。ただし GAS の `after()` トリガーは指定値に関わらず発火まで 1 分前後かかるので、**1 枠目はクライアントが蹴る**: `webStart*` が実際に開始したとき(キューに積んだだけのときは付けない)は `kick: true` を返し、`call()` の成功ハンドラが**ボタンを無効化しない別リクエスト**で `webKick()`(中身は `continuesFetch()`)を呼ぶ。トリガーは保険としてそのまま張る。両方動いても `LockService` が排他し、後から来た方は読み飛ばすか次のフェーズを拾う。蹴りの失敗はログに出すだけ(トリガーが引き継ぐ)。
-- **状態行の文言**(`render`): 待機中 / `新着を確認中… k / N 作品`(`PHASE=BATCH_NEXT`。`running.batchDone` / `batchTotal`)/ `実行中: 作品名（PHASE） d / t 話（k / N 作品目）`(一括の中の 1 作品。単発取得では末尾の括弧が付かない)。`lastBatchResult`(`BATCH_RESULT`)は**開いている間に値が変わったときだけ**ログ欄に 1 行出す(`seenBatchResult`。開いた時点の値は前回の結果なので出さない)。
+- **即応起動**: `webStart*`(`webSeedSelected` 含む)は run 状態をセットして `ensureTriggerAfter(WEB_KICKOFF_DELAY_MS)` で短い遅延のトリガーを張り、即座に返す。一括続き取得・選択登録も同じで、**新着確認・目次取得をリクエスト内で行わない**(戻してはいけない設計判断を参照)。ただし GAS の `after()` トリガーは指定値に関わらず発火まで 1 分前後かかるので、**1 枠目はクライアントが蹴る**: `webStart*` が実際に開始したとき(キューに積んだだけのときは付けない)は `kick: true` を返し、`call()` の成功ハンドラが**ボタンを無効化しない別リクエスト**で `webKick()`(中身は `continuesFetch()`)を呼ぶ。トリガーは保険としてそのまま張る。両方動いても `LockService` が排他し、後から来た方は読み飛ばすか次のフェーズを拾う。蹴りの失敗はログに出すだけ(トリガーが引き継ぐ)。
+- **状態行の文言**(`render`): 待機中 / `PHASE=BATCH_NEXT` の間は `running.batchKind` で分岐(`新着を確認中… k / N 作品` / `作品を登録中… k / N 作品`)/ `実行中: 作品名（PHASE） d / t 話（k / N 作品目）`(一括続き取得の中の 1 作品。単発取得では末尾の括弧が付かない。選択登録は `runFetchPhase` に遷移しないのでこの表示にはならない)。`lastBatchResult`(`BATCH_RESULT`)は**開いている間に値が変わったときだけ**ログ欄に 1 行出す(`seenBatchResult`。開いた時点の値は前回の結果なので出さない)。
+- **候補から選んで登録**(「候補から選んで登録」カード): `kaku_scraping/tools/extract_antenna_list.js` をカクヨムの閲覧履歴・未読あり一覧のページでブラウザのコンソール実行し、出力された JSON(`{url,title,unread,total}[]`)をテキストエリアに貼り付けて「読み込み」を押す。クライアント側 `seedCandidates`(workId → 候補)に**作品IDで重複統合**して溜まる(複数ページぶん貼り付けても増え続ける)。一覧では未読・全話数・登録済みかどうかを表示し、チェックした行だけ「選択した作品を登録」で `webSeedSelected([{url, readCount}])` に渡す(`readCount = 全話数 − 未読話数`。値が無ければ省略し、サーバー側は「全話取得済み」扱いにする)。カクヨム側から渡ってくる `title` 等の外部由来テキストも `textContent` で描画する(他の一覧と同じ XSS 対策)。
 - **デプロイ**: `deploy.yml` は `clasp push` のみでデプロイ版数を更新しない。**テストデプロイの `/dev` URL は常に最新コード**で動くので、この運用では `/dev` を使う。`/exec` を使うには `clasp deploy` の追加が要る。マニフェストの `webapp` 設定と `HtmlService` は追加スコープ不要(再認可不要)。
 - **XSS**: 作品タイトル等の外部由来テキストは必ず `textContent` で描画する。`innerHTML` に流し込まない。
 - **ポーリングは取得操作を実行している間だけ**(`scheduleNextRefresh`): `webGetState` の応答で `running.active` が true の間だけ `POLL_MS`(7 秒)後の次回を予約する自走方式。**待機中は次回を予約せず完全に止まる**。再開のきっかけはボタン操作(`call()` 成功時の `refresh()`)・「今すぐ更新」・ページ再読み込み。失敗時は状態不明なので `POLL_MS` 後に 1 回再試行。Web UI の外(GAS エディタ)から開始した run には、リロードかボタン操作まで気づかない(許容済み)。
@@ -97,7 +104,8 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 - `RUN_STATE_KEYS` のキー … 実行中の一時状態。`clearRunState` で消える。
 - `RESUME_<workId>` … 記録 `{title,url,total,lastEpisodeId,docIds,lastCursor,updatedAt}`。`lastCursor` は参考値で位置決定には使わない。`updatedAt` は `'yyyy-MM-dd HH:mm'`(分単位)。
 - `BATCH_MODE` / `BATCH_QUEUE` … 順番待ちキュー(RUN_STATE_KEYS 外。作品完了で消えない)。
-- `BATCH_TOTAL` / `BATCH_FETCHED` … 一括の進捗。`BATCH_TOTAL` は積んだ作品の総数(表示の分母。`webClearQueue` で取り消した分は減らす)、`BATCH_FETCHED` は新着ありで取得に入った回数。確認済み件数は保存せず `BATCH_TOTAL − キュー長` で求める(`webGetState` の `batchDone`)。`finishBatch_` / `resetAll` が消す。
+- `BATCH_KIND` … 進行中の一括処理の種別(`'cont'`=一括続き取得 / `'seed'`=選択登録)。Web UI の進捗文言の分岐にのみ使う(処理そのものは `mode` がキュー要素ごとに持つので、混在しても実害はない)。
+- `BATCH_TOTAL` / `BATCH_FETCHED` / `BATCH_SEEDED` … 一括の進捗。`BATCH_TOTAL` は積んだ作品の総数(表示の分母。`webClearQueue` で取り消した分は減らす)、`BATCH_FETCHED` は新着ありで取得に入った回数、`BATCH_SEEDED` は選択登録で記録を保存できた回数。確認済み件数は保存せず `BATCH_TOTAL − キュー長` で求める(`webGetState` の `batchDone`)。`finishBatch_` / `resetAll` が消す。
 - `BATCH_RESULT` … 直近の一括の結果 1 行。消さない(Web UI は開いている間に値が変わったときだけログに出す)。
 - `INDEX_SHEET_ID` … 索引スプレッドシートの ID。
 - `SHORT_FILENAME` … ファイル名短縮の ON/OFF(`'0'` で OFF。未設定は ON)。

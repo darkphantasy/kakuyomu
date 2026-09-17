@@ -67,10 +67,11 @@ function webGetState() {
       active:    isRunActive_(props),
       phase:     all.PHASE || '',
       batchNext: all.PHASE === PHASE_BATCH_NEXT,
+      batchKind: all.BATCH_KIND || 'cont', // 'cont'=一括続き取得の新着確認 / 'seed'=選択登録
       title:     all.TITLE || '',
       done:      Number(all.NEXT_INDEX || 0),
       total:     eps.length,
-      // 一括続き取得の進み具合（確認済み k / 全 N 作品）。キューから取り出した時点で k が進む
+      // 一括処理の進み具合（確認済み k / 全 N 作品）。キューから取り出した時点で k が進む
       batchTotal: batchTotal,
       batchDone:  batchTotal ? Math.max(0, batchTotal - queue.length) : 0,
     },
@@ -141,9 +142,38 @@ function webStartContinuationAll() {
   // ここでは新着確認をしない（全作品の目次を取りに行くと応答が返るまで画面が固まる）。
   // キューと PHASE_BATCH_NEXT を立ててトリガーを張るだけで即座に返し、確認〜取得は
   // continuesFetch の BATCH_NEXT 分岐に任せる。進捗は webGetState の batchDone/batchTotal で見える。
-  startBatch_(props, entries);
+  startBatch_(props, entries, 'cont');
   ensureTriggerAfter(WEB_KICKOFF_DELAY_MS);
   return { ok: true, kick: true, message: `一括続き取得を開始しました。${entries.length} 作品の新着を順に確認します。` };
+}
+
+// ==========================================
+// 選択登録（閲覧履歴・未読あり一覧から選んだ作品をまとめて一覧に追加）
+//   items: [{ url, readCount? }, ...]。readCount は「そこまでは取得済みとして記録する」話数
+//   （カクヨム側の「全話数 − 未読話数」。省略時は全話取得済み扱い＝以前からある seedResumeRecord
+//   と同じ既定）。一括続き取得と同じキュー（BATCH_QUEUE）を使い回し、mode:'seed' の要素として積む。
+//   ここでは目次取得をしない（webStartContinuationAll と同じ理由）。
+// ==========================================
+function webSeedSelected(items) {
+  items = Array.isArray(items) ? items : [];
+  const entries = items
+    .map(it => ({
+      url:       String((it && it.url) || '').trim(),
+      mode:      'seed',
+      readCount: (it && it.readCount != null && it.readCount !== '') ? Number(it.readCount) : undefined,
+    }))
+    .filter(e => e.url && extractWorkId(e.url));
+  if (entries.length === 0) return { ok: false, message: '登録できる作品がありません（URLを確認してください）。' };
+
+  const props = PropertiesService.getScriptProperties();
+  if (isRunActive_(props)) {
+    const n = pushBatchQueue_(props, entries);
+    return { ok: true, message: `実行中のため、${entries.length} 作品を順番待ちに追加しました（計 ${n} 件）。` };
+  }
+
+  startBatch_(props, entries, 'seed');
+  ensureTriggerAfter(WEB_KICKOFF_DELAY_MS);
+  return { ok: true, kick: true, message: `${entries.length} 作品の登録を開始しました。` };
 }
 
 // ==========================================
@@ -212,7 +242,7 @@ function webClearQueue() {
   const total = Number(props.getProperty('BATCH_TOTAL') || 0);
   props.setProperties({ BATCH_QUEUE: '[]', BATCH_TOTAL: String(Math.max(0, total - queue.length)) });
   if (!isRunActive_(props)) {
-    ['BATCH_MODE', 'BATCH_TOTAL', 'BATCH_FETCHED'].forEach(k => props.deleteProperty(k));
+    ['BATCH_MODE', 'BATCH_KIND', 'BATCH_TOTAL', 'BATCH_FETCHED', 'BATCH_SEEDED'].forEach(k => props.deleteProperty(k));
   }
   return { ok: true, message: `順番待ち ${queue.length} 件を取り消しました（実行中の取得は継続します）。` };
 }

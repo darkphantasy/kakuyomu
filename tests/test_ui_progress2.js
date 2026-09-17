@@ -22,7 +22,7 @@ const sandbox = {
   console,
   document: {
     getElementById: () => ({
-      value: '', textContent: '', childNodes: [], firstChild: null, lastChild: null,
+      value: '', textContent: '', childNodes: [], firstChild: null, lastChild: null, style: {},
       insertBefore(){}, removeChild(){}, appendChild(){},
     }),
     querySelectorAll: () => [],

@@ -23,7 +23,7 @@ const docObj = {
   hidden: false,
   addEventListener(evt, fn) { if (evt === 'visibilitychange') visHandler = fn; },
   getElementById: () => ({
-    value: '', textContent: '', childNodes: [], firstChild: null, lastChild: null,
+    value: '', textContent: '', childNodes: [], firstChild: null, lastChild: null, style: {},
     insertBefore(){}, removeChild(){}, appendChild(){},
   }),
   querySelectorAll: () => [],

@@ -152,6 +152,35 @@
       </div>
 
       <div class="card">
+        <h2>候補から選んで登録</h2>
+        <p style="font-size:12px;color:var(--muted);margin:0 0 8px">
+          カクヨムの「<a href="https://kakuyomu.jp/my/reading_histories" target="_blank">閲覧履歴</a>」または
+          「<a href="https://kakuyomu.jp/my/antenna/works?serial_status=all" target="_blank">未読あり</a>」を開いた状態で、
+          ブラウザの開発者ツール（コンソール）に抽出スクリプト（<code>kaku_scraping/tools/</code> 参照）を貼り付けて実行し、
+          出力された JSON をここに貼り付けてください。
+        </p>
+        <textarea id="seedPaste" rows="3" style="width:100%;font-family:monospace;font-size:12px;padding:8px;border:1px solid var(--line);border-radius:6px" placeholder='[{"url":"https://kakuyomu.jp/works/...","title":"...","unread":8,"total":305}, ...]'></textarea>
+        <div class="btns">
+          <button onclick="doParseSeed()">読み込み</button>
+          <button onclick="doSelectUnreadSeed()">未読ありを全選択</button>
+          <button onclick="doClearSeedSelection()">選択解除</button>
+          <button class="primary" onclick="doRegisterSeed()">選択した作品を登録</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th></th>
+              <th>作品</th>
+              <th class="num">未読 / 全話</th>
+              <th>状態</th>
+            </tr>
+          </thead>
+          <tbody id="seedList"></tbody>
+        </table>
+        <div id="seedEmpty" class="empty">候補がまだありません。</div>
+      </div>
+
+      <div class="card">
         <h2>設定・その他</h2>
         <div class="btns" style="margin-top:0">
           <button onclick="doToggleShort()">ファイル名短縮: <b id="shortState">…</b></button>
@@ -182,6 +211,10 @@
       var readingEp = {};         // workId -> 話数 or 'latest'（未読なし＝最新話まで読了）
       var pendingEpIds = {};      // workId -> true
       var PROGRESS_CHUNK = 5;     // 1回の問い合わせで見る作品数（未キャッシュだと1件ずつ読むため）
+
+      // 候補から選んで登録（閲覧履歴・未読あり一覧の貼り付けから）
+      //   workId -> { url, title, unread, total, checked }。複数回貼り付けても workId で重複しない。
+      var seedCandidates = {};
 
       // まだサイズを知らない docId だけをまとめて問い合わせる（主にページ読込時）。
       //   次話の問い合わせが進行中の作品は飛ばす（次話の判定結果にサイズも同梱されるため。
@@ -420,9 +453,11 @@
         if (!r.active) {
           $('runText').textContent = '待機中';
         } else if (r.batchNext) {
-          // 一括続き取得の新着確認中（目次を順に取りに行っている）。作品が確定すると下の「実行中」に変わる
+          // 一括処理の途中（目次を順に取りに行っている）。'cont' は新着確認、'seed' は選択登録。
+          // 'cont' で新着が見つかると下の「実行中」に変わる（'seed' は run 状態に遷移しない）。
+          var batchLabel = (r.batchKind === 'seed') ? '作品を登録中…' : '新着を確認中…';
           $('runText').textContent = r.batchTotal
-            ? '新着を確認中… ' + r.batchDone + ' / ' + r.batchTotal + ' 作品'
+            ? batchLabel + ' ' + r.batchDone + ' / ' + r.batchTotal + ' 作品'
             : '次の作品を準備中…';
         } else {
           var prog = r.total ? (' ' + r.done + ' / ' + r.total + ' 話') : '';
@@ -432,6 +467,7 @@
         $('shortState').textContent = s.shortFilename ? 'ON' : 'OFF';
 
         renderTable();
+        renderSeedList();
       }
 
       // 並び替えの比較。第1キーが同値のときはタイトル・作品IDまで見て順序を固定する
@@ -563,6 +599,114 @@
           tr.appendChild(tdUpd);
           tr.appendChild(tdDocs);
           tr.appendChild(tdAct);
+          tb.appendChild(tr);
+        });
+      }
+
+      // URL から作品ID（数字部分）を取り出す。クライアント側での重複排除・照合用。
+      function extractWorkIdFromUrl_(u) {
+        var m = String(u || '').match(/\/works\/(\d+)/);
+        return m ? m[1] : null;
+      }
+
+      // 貼り付けた JSON（閲覧履歴・未読あり一覧の抽出結果）を候補に取り込む。
+      //   複数回貼り付けても workId で重複しない（後から貼った方の unread/total で上書き）。
+      function doParseSeed() {
+        var raw = $('seedPaste').value.trim();
+        if (!raw) { log('貼り付け欄が空です。', true); return; }
+        var items;
+        try { items = JSON.parse(raw); } catch (e) { log('JSON として読み取れませんでした: ' + e.message, true); return; }
+        if (!Array.isArray(items)) { log('配列の JSON を貼り付けてください。', true); return; }
+
+        var added = 0;
+        items.forEach(function (it) {
+          var workId = extractWorkIdFromUrl_(it && it.url);
+          if (!workId) return;
+          var prev = seedCandidates[workId];
+          seedCandidates[workId] = {
+            url:     'https://kakuyomu.jp/works/' + workId,
+            title:   (it.title != null ? String(it.title) : (prev ? prev.title : workId)),
+            unread:  (it.unread != null ? Number(it.unread) : (prev ? prev.unread : null)),
+            total:   (it.total  != null ? Number(it.total)  : (prev ? prev.total  : null)),
+            checked: prev ? prev.checked : false,
+          };
+          added++;
+        });
+        $('seedPaste').value = '';
+        log(added + ' 件の候補を取り込みました。');
+        renderSeedList();
+      }
+
+      // 未読があり、まだ一覧に登録されていない候補をまとめて選択する
+      function doSelectUnreadSeed() {
+        var registered = {};
+        if (lastState) lastState.works.forEach(function (w) { registered[w.workId] = true; });
+        Object.keys(seedCandidates).forEach(function (workId) {
+          var c = seedCandidates[workId];
+          if (!registered[workId] && c.unread > 0) c.checked = true;
+        });
+        renderSeedList();
+      }
+
+      function doClearSeedSelection() {
+        Object.keys(seedCandidates).forEach(function (workId) { seedCandidates[workId].checked = false; });
+        renderSeedList();
+      }
+
+      // チェックした候補をまとめて登録する。既読分（全話数－未読話数）は取得済み扱いにして
+      // スキップする（readCount を渡す）。カクヨム側の未読・全話数が取れていない候補は
+      // readCount を省略し、既存の seedResumeRecord と同じ「全話取得済み」扱いにする。
+      function doRegisterSeed() {
+        var items = [];
+        Object.keys(seedCandidates).forEach(function (workId) {
+          var c = seedCandidates[workId];
+          if (!c.checked) return;
+          var item = { url: c.url };
+          if (c.total != null && c.unread != null) item.readCount = Math.max(0, c.total - c.unread);
+          items.push(item);
+        });
+        if (items.length === 0) { log('選択された候補がありません。', true); return; }
+        if (!confirm(items.length + ' 作品を一覧に登録します。よろしいですか?')) return;
+        call('webSeedSelected', [items]);
+      }
+
+      // 候補一覧の描画（サーバーは呼ばない。lastState と突き合わせて「登録済み」を判定する）
+      function renderSeedList() {
+        var tb = $('seedList');
+        tb.textContent = '';
+        var registered = {};
+        if (lastState) lastState.works.forEach(function (w) { registered[w.workId] = true; });
+
+        var workIds = Object.keys(seedCandidates);
+        $('seedEmpty').style.display = workIds.length ? 'none' : 'block';
+
+        workIds.forEach(function (workId) {
+          var c = seedCandidates[workId];
+          var isRegistered = !!registered[workId];
+          var tr = document.createElement('tr');
+
+          var tdChk = document.createElement('td');
+          var chk = document.createElement('input');
+          chk.type = 'checkbox';
+          chk.checked = !!c.checked;
+          chk.disabled = isRegistered;
+          chk.onchange = function () { c.checked = chk.checked; };
+          tdChk.appendChild(chk);
+
+          var tdTitle = document.createElement('td');
+          tdTitle.textContent = c.title; // textContent なので HTML として解釈されない
+
+          var tdCount = document.createElement('td');
+          tdCount.className = 'num';
+          tdCount.textContent = (c.unread != null ? c.unread : '?') + ' / ' + (c.total != null ? c.total : '?');
+
+          var tdStatus = document.createElement('td');
+          tdStatus.textContent = isRegistered ? '登録済み' : '';
+
+          tr.appendChild(tdChk);
+          tr.appendChild(tdTitle);
+          tr.appendChild(tdCount);
+          tr.appendChild(tdStatus);
           tb.appendChild(tr);
         });
       }

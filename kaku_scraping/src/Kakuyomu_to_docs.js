@@ -191,12 +191,14 @@ function enqueueWork_(props, entry) {
   return pushBatchQueue_(props, [entry]);
 }
 
-// 何も動いていない状態から一括続き取得を始める。キューを新規に作り PHASE_BATCH_NEXT を立てる。
-//   ここでは新着確認をしない。確認と取得は continuesFetch の BATCH_NEXT 分岐が担う
+// 何も動いていない状態から一括処理を始める。キューを新規に作り PHASE_BATCH_NEXT を立てる。
+//   ここでは新着確認・目次取得をしない。確認と取得は continuesFetch の BATCH_NEXT 分岐が担う
 //   （リクエストの中で全作品の目次を取りに行くと、応答が返るまで Web UI が固まるため）。
-function startBatch_(props, entries) {
+//   kind: 'cont'（一括続き取得。既定）/ 'seed'（選択登録）。Web UI の進捗表示にだけ使う。
+function startBatch_(props, entries, kind) {
   props.setProperties({
     BATCH_MODE:    '1',
+    BATCH_KIND:    kind || 'cont',
     BATCH_QUEUE:   JSON.stringify(entries),
     BATCH_TOTAL:   String(entries.length),
     BATCH_FETCHED: '0',
@@ -204,15 +206,19 @@ function startBatch_(props, entries) {
   });
 }
 
-// 一括続き取得の終了処理。結果を1行に残し（Web UI がログに出す）、キュー関連のプロパティを消す。
+// 一括処理の終了処理。結果を1行に残し（Web UI がログに出す）、キュー関連のプロパティを消す。
 function finishBatch_(props) {
   const total   = Number(props.getProperty('BATCH_TOTAL')   || 0);
   const fetched = Number(props.getProperty('BATCH_FETCHED') || 0);
+  const seeded  = Number(props.getProperty('BATCH_SEEDED')  || 0);
   const stamp   = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'HH:mm');
-  const result  = `一括続き取得 完了（${stamp}）: 確認 ${total} 作品・新着あり ${fetched} 作品`;
+  let result = `一括続き取得 完了（${stamp}）: 確認 ${total} 作品・新着あり ${fetched} 作品`;
+  if (seeded > 0) result += `・登録 ${seeded} 作品`;
   Logger.log(result);
   props.setProperty('BATCH_RESULT', result);
-  ['BATCH_MODE', 'BATCH_QUEUE', 'BATCH_TOTAL', 'BATCH_FETCHED'].forEach(k => props.deleteProperty(k));
+  ['BATCH_MODE', 'BATCH_KIND', 'BATCH_QUEUE', 'BATCH_TOTAL', 'BATCH_FETCHED', 'BATCH_SEEDED'].forEach(k => props.deleteProperty(k));
+  // 選択登録は seedResumeRecordAt_ 側で索引を更新しない（件数ぶん繰り返さないため）。ここで1回だけ行う。
+  if (seeded > 0) { try { updateIndexSpreadsheet(); } catch(e) { Logger.log('索引シート更新エラー: ' + e); } }
 }
 
 // キュー要素を正規化する。
@@ -340,19 +346,21 @@ function startContinuationAll() {
   continuesFetch(); // BATCH_NEXT 分岐が新着確認〜取得を進める
 }
 
-// バッチキューから次の作品を取り出し、取得の準備をする（新着確認）。
+// バッチキューから次の作品を取り出し、取得の準備をする（新着確認 / 選択登録）。
 //   呼ぶ前に PHASE を立てておくこと（目次取得の間も「実行中」に見せるため）。
 //   返り値: BATCH_STARTED（run 状態をセットした。PHASE=FETCHING）
 //           BATCH_EXHAUSTED（キューを使い切った）
 //           BATCH_DEFERRED（時間切れ。トリガーは張り直し済みで PHASE は変えない）
 //   キューは1作品取り出すごとに保存するので、途中で中断しても次回はその続きから確認できる。
-//   キュー要素は {url, mode:'fetch'|'cont', startEpisode?, endEpisode?}。
+//   キュー要素は {url, mode:'fetch'|'cont'|'seed', startEpisode?, endEpisode?, readCount?}。
 //   旧形式（workId の文字列）も続き取得として受け付ける。
+//   'seed' は目次取得だけして記録を保存し（本文は取得しない）、run 状態はセットせずに次のキュー
+//   項目へ進む（選択登録。閲覧履歴・未読あり一覧から選んだ作品をまとめて一覧に追加する用途）。
 function batchStartNext(props, startTime) {
   let queue = JSON.parse(props.getProperty('BATCH_QUEUE') || '[]');
   while (queue.length > 0) {
     if (typeof startTime === 'number' && Date.now() - startTime > TIMEOUT_THRESHOLD_MS) {
-      Logger.log(`⏳ 新着確認の途中で時間切れ（残り ${queue.length} 作品）。次の実行枠で続きを確認します。`);
+      Logger.log(`⏳ 確認の途中で時間切れ（残り ${queue.length} 作品）。次の実行枠で続きを確認します。`);
       ensureTriggerAfter();
       return BATCH_DEFERRED;
     }
@@ -365,6 +373,21 @@ function batchStartNext(props, startTime) {
       Logger.log(`▼ 次の作品（初回取得）: ${entry.url}`);
       if (prepareFetch(entry.url, entry.startEpisode, entry.endEpisode)) return markBatchStarted_(props);
       continue; // 準備できなければ次へ
+    }
+
+    if (entry.mode === 'seed') {
+      if (!entry.url) { Logger.log('URLなし、スキップ（選択登録）'); continue; }
+      Logger.log(`▼ 次の作品（選択登録）: ${entry.url}`);
+      try {
+        const result = seedResumeRecordAt_(entry.url, [], entry.readCount);
+        if (result) {
+          props.setProperty('BATCH_SEEDED', String(Number(props.getProperty('BATCH_SEEDED') || 0) + 1));
+          Logger.log(`登録しました:「${result.title}」${result.total} / ${result.totalEpisodes} 話まで取得済み扱い`);
+        }
+      } catch(e) {
+        Logger.log(`選択登録に失敗: ${entry.url} / ${e}`);
+      }
+      continue; // run 状態はセットしない。次のキュー項目へ
     }
 
     // 続き取得：URL 指定があればそれを、無ければ記録から引く
@@ -457,20 +480,39 @@ function prepareContinuation(url) {
 //   ※ 既存ドキュメントが現時点より前なら、続きに既読分が混じる可能性あり。
 // ==========================================
 function seedResumeRecord(url, existingDocIds) {
-  const targetUrl = url || KAKUYOMU_URL;
   // 既にある取得済みドキュメントのIDを渡すと、続き取得時にそのドキュメント（末尾のもの）
   // へ追記します。省略時は下の配列（初期値は空＝続き取得時に新規作成）を使う。
   const docIds = existingDocIds || [
     // '1AbCdEf...既存ドキュメントID...',
   ];
 
+  const result = seedResumeRecordAt_(url, docIds);
+  if (!result) return;
+  Logger.log(`現在地を記録しました:「${result.title}」${result.totalEpisodes} 話 / 既存ドキュメント ${docIds.length} 件`);
+  Logger.log('以降は startContinuation で続きだけ取得できます。');
+  try { updateIndexSpreadsheet(); } catch(e) { Logger.log('索引シート更新エラー: ' + e); }
+}
+
+// seedResumeRecord の本体（読了済み話数を指定できる版）。
+//   readCount 省略時は「現在の全話を取得済み」とみなす（seedResumeRecord と同じ挙動）。
+//   readCount を指定すると「そこまでは取得済み・そこから先を続き取得の対象にする」記録になる
+//   （閲覧履歴・未読あり一覧から選んで登録するとき、既読分をスキップするために使う）。
+//   索引シートの更新はしない（呼び出し側でまとめて1回行う）。
+function seedResumeRecordAt_(url, existingDocIds, readCount) {
+  const targetUrl = url || KAKUYOMU_URL;
+  const docIds = existingDocIds || [];
+
   const workId = extractWorkId(targetUrl);
-  if (!workId) { Logger.log('作品IDの取得失敗'); return; }
+  if (!workId) { Logger.log('作品IDの取得失敗: ' + targetUrl); return null; }
 
   const catalog = loadWorkCatalog_(targetUrl, workId);
-  if (!catalog) return;
+  if (!catalog) return null;
   const { title, episodes: allEpisodes } = catalog;
-  if (allEpisodes.length === 0) { Logger.log('エピソードが見つかりません。'); return; }
+  if (allEpisodes.length === 0) { Logger.log('エピソードが見つかりません: ' + targetUrl); return null; }
+
+  const total = (readCount === undefined || readCount === null)
+    ? allEpisodes.length
+    : Math.max(0, Math.min(Number(readCount), allEpisodes.length));
 
   // 既存ドキュメントがあれば末尾cursorを先取りして記録（続き取得時の追記起点）
   let lastCursor = 0;
@@ -482,15 +524,13 @@ function seedResumeRecord(url, existingDocIds) {
   saveResumeRecord(workId, {
     title:         title,
     url:           targetUrl,
-    total:         allEpisodes.length,
-    lastEpisodeId: allEpisodes[allEpisodes.length - 1].id,
+    total:         total,
+    lastEpisodeId: total > 0 ? allEpisodes[total - 1].id : '',
     docIds:        docIds,
     lastCursor:    lastCursor,
     updatedAt:     Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm'),
   });
-  Logger.log(`現在地を記録しました:「${title}」${allEpisodes.length} 話 / 既存ドキュメント ${docIds.length} 件`);
-  Logger.log('以降は startContinuation で続きだけ取得できます。');
-  try { updateIndexSpreadsheet(); } catch(e) { Logger.log('索引シート更新エラー: ' + e); }
+  return { workId: workId, title: title, total: total, totalEpisodes: allEpisodes.length };
 }
 
 // ==========================================
@@ -1754,9 +1794,9 @@ function checkProgress() {
   Logger.log(`BUILD_DOC_PART:    ${all.BUILD_DOC_PART} （${docIds.length} 冊目）`);
   Logger.log(`BUILD_FOOTER_DONE: ${all.BUILD_FOOTER_DONE}`);
   Logger.log(`DOC_IDS:           ${all.DOC_IDS}`);
-  Logger.log(`BATCH_MODE:        ${all.BATCH_MODE}`);
+  Logger.log(`BATCH_MODE:        ${all.BATCH_MODE} （${all.BATCH_KIND || 'cont'}）`);
   Logger.log(`BATCH_QUEUE:       ${all.BATCH_QUEUE}`);
-  Logger.log(`BATCH_TOTAL:       ${all.BATCH_TOTAL} （新着あり ${all.BATCH_FETCHED || 0}）`);
+  Logger.log(`BATCH_TOTAL:       ${all.BATCH_TOTAL} （新着あり ${all.BATCH_FETCHED || 0}・登録 ${all.BATCH_SEEDED || 0}）`);
   Logger.log(`BATCH_RESULT:      ${all.BATCH_RESULT}`);
 }
 
@@ -1806,7 +1846,7 @@ function resetAll() {
   }
 
   clearRunState(props); // run状態のみ消す。続き取得記録(RESUME)は残す
-  ['BATCH_MODE', 'BATCH_QUEUE', 'BATCH_TOTAL', 'BATCH_FETCHED'].forEach(k => props.deleteProperty(k));
+  ['BATCH_MODE', 'BATCH_KIND', 'BATCH_QUEUE', 'BATCH_TOTAL', 'BATCH_FETCHED', 'BATCH_SEEDED'].forEach(k => props.deleteProperty(k));
   Logger.log('リセット完了（途中状態を消去）。startFetch / startContinuation を再実行してください。');
   Logger.log('※ 続き取得記録は保持しています。記録も消すなら clearResumeRecord を実行してください。');
 }
