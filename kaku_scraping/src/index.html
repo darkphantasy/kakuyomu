@@ -198,6 +198,7 @@
               <th></th>
               <th>作品</th>
               <th class="num">未読 / 全話</th>
+              <th class="num">開始話数</th>
               <th>状態</th>
             </tr>
           </thead>
@@ -757,6 +758,8 @@
             unread:  (it.unread != null ? Number(it.unread) : (prev ? prev.unread : null)),
             total:   (it.total  != null ? Number(it.total)  : (prev ? prev.total  : null)),
             checked: prev ? prev.checked : false,
+            // 開始話数の手動指定（未指定なら null＝自動計算に従う）。再読み込みしても消えない。
+            startEpisode: prev ? prev.startEpisode : null,
           };
           added++;
         });
@@ -781,16 +784,31 @@
         renderSeedList();
       }
 
-      // チェックした候補をまとめて登録する。既読分（全話数－未読話数）は取得済み扱いにして
-      // スキップする（readCount を渡す）。カクヨム側の未読・全話数が取れていない候補は
-      // readCount を省略し、既存の seedResumeRecord と同じ「全話取得済み」扱いにする。
+      // 開始話数の自動計算値（未読・全話数の両方が分かっているときだけ）。
+      //   「そこから取得を始める話数」＝ 全話数－未読話数＋1。
+      function seedAutoStartEpisode_(c) {
+        return (c.total != null && c.unread != null) ? Math.max(1, c.total - c.unread + 1) : null;
+      }
+
+      // 登録時に渡す readCount（「そこまでは取得済み扱いにする話数」）。
+      //   開始話数の手動指定があればそれを優先し、無ければ自動計算値、
+      //   どちらも無ければ省略する（サーバー側は「全話取得済み」扱いにする）。
+      function seedEffectiveReadCount_(c) {
+        var start = (c.startEpisode != null) ? c.startEpisode : seedAutoStartEpisode_(c);
+        return (start != null) ? Math.max(0, start - 1) : null;
+      }
+
+      // チェックした候補をまとめて登録する。既読分（開始話数の手前まで）は取得済み扱いに
+      // してスキップする（readCount を渡す）。開始話数が分からない候補は readCount を省略し、
+      // 既存の seedResumeRecord と同じ「全話取得済み」扱いにする。
       function doRegisterSeed() {
         var items = [];
         Object.keys(seedCandidates).forEach(function (workId) {
           var c = seedCandidates[workId];
           if (!c.checked) return;
           var item = { url: c.url };
-          if (c.total != null && c.unread != null) item.readCount = Math.max(0, c.total - c.unread);
+          var readCount = seedEffectiveReadCount_(c);
+          if (readCount != null) item.readCount = readCount;
           items.push(item);
         });
         if (items.length === 0) { log('選択された候補がありません。', true); return; }
@@ -828,12 +846,32 @@
           tdCount.className = 'num';
           tdCount.textContent = (c.unread != null ? c.unread : '?') + ' / ' + (c.total != null ? c.total : '?');
 
+          // 開始話数：自動計算値を初期表示しつつ、任意の話数に手動で変更できる。
+          //   空欄にすると自動計算（未指定なら「全話取得済み」扱い）に戻る。
+          var tdStart = document.createElement('td');
+          tdStart.className = 'num';
+          var startInput = document.createElement('input');
+          startInput.type = 'number';
+          startInput.min = '1';
+          startInput.style.width = '64px';
+          var autoStart = seedAutoStartEpisode_(c);
+          var shownStart = (c.startEpisode != null) ? c.startEpisode : autoStart;
+          startInput.value = (shownStart != null) ? shownStart : '';
+          startInput.placeholder = '未指定';
+          startInput.disabled = isRegistered;
+          startInput.onchange = function () {
+            var v = parseInt(startInput.value, 10);
+            c.startEpisode = (startInput.value.trim() === '' || isNaN(v) || v < 1) ? null : v;
+          };
+          tdStart.appendChild(startInput);
+
           var tdStatus = document.createElement('td');
           tdStatus.textContent = isRegistered ? '登録済み' : '';
 
           tr.appendChild(tdChk);
           tr.appendChild(tdTitle);
           tr.appendChild(tdCount);
+          tr.appendChild(tdStart);
           tr.appendChild(tdStatus);
           tb.appendChild(tr);
         });

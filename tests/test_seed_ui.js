@@ -59,6 +59,33 @@ check('渡す items が正しい', calls[0][1], [
   { url: 'https://kakuyomu.jp/works/111', readCount: 8 }, { url: 'https://kakuyomu.jp/works/333' },
 ]);
 
+section('開始話数：自動計算値と、任意指定での上書き');
+check('自動計算値（作品A: 全10－未読2＋1）', g('seedAutoStartEpisode_(seedCandidates["111"])'), 9);
+check('未読・全話数が不明なら自動計算できない', g('seedAutoStartEpisode_(seedCandidates["333"])'), null);
+check('未指定なら自動計算値がそのまま readCount になる', g('seedEffectiveReadCount_(seedCandidates["111"])'), 8);
+
+g('seedCandidates["111"].startEpisode = 5;'); // 5話目から取得したい（＝4話まで既読扱い）
+check('手動指定があればそちらを優先する', g('seedEffectiveReadCount_(seedCandidates["111"])'), 4);
+
+calls.length = 0;
+nextResponse = { ok: true, message: '登録しました。' };
+g('doRegisterSeed()'); // 111（手動指定）・333（数値不明）はチェック済みのまま
+check('手動指定した開始話数が readCount に反映されて送られる', calls[0][1], [
+  { url: 'https://kakuyomu.jp/works/111', readCount: 4 }, { url: 'https://kakuyomu.jp/works/333' },
+]);
+
+g('seedCandidates["111"].startEpisode = null;'); // 空欄に戻す＝自動計算に戻る
+check('空欄に戻すと自動計算値に戻る', g('seedEffectiveReadCount_(seedCandidates["111"])'), 8);
+
+section('開始話数の手動指定は、再度貼り付けても消えない');
+g(`$('seedPaste').value = ${JSON.stringify(JSON.stringify([
+  { url: 'https://kakuyomu.jp/works/111', title: '作品A', unread: 1, total: 10 }, // 未読数だけ更新
+]))};`);
+g('seedCandidates["111"].startEpisode = 7;');
+g('doParseSeed()');
+check('unread は新しい値に更新される', g('seedCandidates["111"].unread'), 1);
+check('startEpisode の手動指定は保持される', g('seedCandidates["111"].startEpisode'), 7);
+
 section('登録済みの作品はチェックできない（登録済みバッジが出る）');
 g('lastState = { works: [{ workId: "111" }] };');
 g('renderSeedList()');
