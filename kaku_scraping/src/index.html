@@ -780,23 +780,26 @@
       //   複数回貼り付けても workId で重複しない（後から貼った方の unread/total で上書き）。
       function doParseSeed() {
         var raw = $('seedPaste').value.trim();
-        if (!raw) { log('貼り付け欄が空です。', true); return; }
-        var items;
-        try { items = JSON.parse(raw); } catch (e) { log('JSON として読み取れませんでした: ' + e.message, true); return; }
-        if (!Array.isArray(items)) { log('配列の JSON を貼り付けてください。', true); return; }
 
-        // 空配列を貼り付けたときは「候補一覧をクリアしたい」という意図として扱う
-        // （マージではなく上書き）。件数が読み取れない・URL が無効等で 0 件になった
-        // 場合（items.length > 0）は既存候補を保持したまま、その旨だけログに出す。
-        if (items.length === 0) {
+        // 貼り付け欄が空のまま「読み込み」を押したときは「候補一覧をクリアしたい」という
+        // 意図として扱う（マージではなく上書き）。候補をクリアする専用ボタンが無いため、
+        // 空欄での送信がその代わりになる（以前は空配列 [] の貼り付けをクリア扱いにしていたが、
+        // 空欄での送信の方が分かりやすいのでそちらへ統一した）。
+        if (!raw) {
           seedCandidates = {};
-          $('seedPaste').value = '';
-          log('空の配列が貼り付けられたため、候補一覧をクリアしました。');
+          log('貼り付け欄が空だったため、候補一覧をクリアしました。');
           renderSeedList();
           return;
         }
 
-        var added = 0;
+        var items;
+        try { items = JSON.parse(raw); } catch (e) { log('JSON として読み取れませんでした: ' + e.message, true); return; }
+        if (!Array.isArray(items)) { log('配列の JSON を貼り付けてください。', true); return; }
+
+        // 新規と更新を分けてログに出す。件数だけだと、既存候補を上書きしただけ（見た目上は
+        // 変化なし）なのか、新しい候補が本当に増えたのかが区別できず、
+        // 「貼り付けても反映されていないように見える」原因になるため。
+        var added = 0, updated = 0;
         items.forEach(function (it) {
           var workId = extractWorkIdFromUrl_(it && it.url);
           if (!workId) return;
@@ -810,10 +813,17 @@
             // 開始話数の手動指定（未指定なら null＝自動計算に従う）。再読み込みしても消えない。
             startEpisode: prev ? prev.startEpisode : null,
           };
-          added++;
+          if (prev) updated++; else added++;
         });
         $('seedPaste').value = '';
-        log(added + ' 件の候補を取り込みました。');
+        if (added === 0 && updated === 0) {
+          log('取り込める候補がありませんでした（URL を確認してください）。', true);
+        } else {
+          var parts = [];
+          if (added   > 0) parts.push('新規 ' + added + ' 件');
+          if (updated > 0) parts.push('更新 ' + updated + ' 件');
+          log(parts.join('・') + 'を取り込みました。');
+        }
         renderSeedList();
       }
 

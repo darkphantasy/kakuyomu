@@ -28,15 +28,17 @@ section('貼り付け→読み込みで候補が取り込まれる');
 g(`$('seedPaste').value = ${JSON.stringify(PASTE)};`);
 g('doParseSeed()');
 check('貼り付け欄はクリアされる', g("$('seedPaste').value"), '');
-check('3件取り込んだ旨をログに出す', state.logs[0].indexOf('3 件') >= 0, true);
+check('新規3件と分かるログを出す', state.logs[0].indexOf('新規 3 件を取り込みました。') >= 0, true);
 
-section('同じ作品を再度貼り付けても重複しない（workId で統合）');
+section('同じ作品を再度貼り付けても重複しない（workId で統合）。ログで新規/更新が分かる');
+state.logs.length = 0;
 g(`$('seedPaste').value = ${JSON.stringify(JSON.stringify([
   { url: 'https://kakuyomu.jp/works/111', title: '作品A', unread: 2, total: 10 }, // 未読数だけ更新
 ]))};`);
 g('doParseSeed()');
 check('候補は3件のまま（新規追加なし）', g('Object.keys(seedCandidates).length'), 3);
 check('既存候補の unread が上書きされる', g('seedCandidates["111"].unread'), 2);
+check('「更新」として1件ぶんログに出る（新規ではない）', state.logs[state.logs.length - 1].indexOf('更新 1 件を取り込みました。') >= 0, true);
 
 section('未読ありを全選択：未読0の作品と、数値不明の作品は選ばれない');
 g('doSelectUnreadSeed()');
@@ -93,13 +95,19 @@ g('renderSeedList()');
 // ここでは例外なく再描画できること・候補データ自体が消えないことだけを確認する。
 check('候補は消えない（登録済みでも一覧には残す）', g('Object.keys(seedCandidates).length'), 3);
 
-section('空配列を貼り付けると候補一覧をクリアする（マージではなく上書き）');
+section('空配列 [] を貼り付けても、もうクリアはされない（0件の取り込みとして扱う）');
 state.logs.length = 0;
 g(`$('seedPaste').value = '[]';`);
 g('doParseSeed()');
+check('候補は消えない（3件のまま）', g('Object.keys(seedCandidates).length'), 3);
+check('取り込める候補が無かった旨をログに出す', state.logs[state.logs.length - 1].indexOf('取り込める候補がありませんでした') >= 0, true);
+
+section('貼り付け欄が空のまま「読み込み」を押すと候補一覧をクリアする');
+state.logs.length = 0;
+g(`$('seedPaste').value = '';`);
+g('doParseSeed()');
 check('候補が0件になる', g('Object.keys(seedCandidates).length'), 0);
-check('クリアした旨をログに出す', state.logs[0].indexOf('クリア') >= 0, true);
-check('貼り付け欄はクリアされる', g("$('seedPaste').value"), '');
+check('クリアした旨をログに出す', state.logs[state.logs.length - 1].indexOf('クリア') >= 0, true);
 
 section('ブックマークレット: 抽出ロジックの関数から javascript: リンクを組み立てる');
 const bm = g('buildSeedBookmarklet_()');
