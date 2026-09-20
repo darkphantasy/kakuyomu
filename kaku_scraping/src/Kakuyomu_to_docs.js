@@ -58,9 +58,18 @@ const INDEX_SHEET_TAB_NAME = '索引'; // 索引スプレッドシート内の�
 const SHORT_FILENAME_MAX_LEN = 30; // ファイル名短縮：これを超えたら読点区切り or 強制トリミング
 
 // runの途中経過に使うプロパティキー（完了時にこれだけ消す。記録・索引IDは残す）
+//   'PHASE' はここに含めない。clearRunState の呼び出し側は、直後にほぼ必ず新しい PHASE を
+//   setProperties で立て直す。PropertiesService はキーごとに別々の呼び出しになるため、
+//   もし PHASE もここで一緒に deleteProperty すると、削除〜再設定の間に PHASE が一瞬
+//   存在しない状態が生じる。その一瞬に別の Web リクエスト（webGetState のポーリング）が
+//   重なると isRunActive_ が false と誤判定され、Web UI が「待機中」と勘違いして
+//   ポーリングを永久に止めてしまう（一度止まると `refresh()` を手動で呼ぶまで戻らないため、
+//   一瞬のすれ違いが「画面が固まって見える」不具合として表面化する）。本当に PHASE ごと
+//   消したい場合（resetAll など、次に新しい PHASE を立てない箇所）は呼び出し側で
+//   明示的に props.deleteProperty('PHASE') する。
 const RUN_STATE_KEYS = [
   'WORK_ID', 'TITLE', 'SOURCE_URL', 'EPISODE_TOTAL', 'LAST_EPISODE_ID',
-  'EPISODES', 'NEXT_INDEX', 'PHASE', 'BUF_COUNT', 'DOC_IDS',
+  'EPISODES', 'NEXT_INDEX', 'BUF_COUNT', 'DOC_IDS',
   'CONTINUATION', 'CONT_FROM', 'CONT_TO', 'CONT_LAST_CURSOR',
   'BUILD_BUF_INDEX', 'BUILD_CURSOR', 'BUILD_DOC_ID', 'BUILD_DOC_PART',
   'BUILD_FOOTER_DONE', 'BUILD_NEED_SEP',
@@ -371,7 +380,10 @@ function batchStartNext(props, startTime) {
     if (entry.mode === 'fetch') {
       if (!entry.url) { Logger.log('URLなし、スキップ（初回取得）'); continue; }
       Logger.log(`▼ 次の作品（初回取得）: ${entry.url}`);
-      if (prepareFetch(entry.url, entry.startEpisode, entry.endEpisode)) return markBatchStarted_(props);
+      let prepared = false;
+      try { prepared = prepareFetch(entry.url, entry.startEpisode, entry.endEpisode); }
+      catch(e) { Logger.log(`初回取得の準備に失敗、スキップ: ${entry.url} / ${e}`); }
+      if (prepared) return markBatchStarted_(props);
       continue; // 準備できなければ次へ
     }
 
@@ -401,8 +413,11 @@ function batchStartNext(props, startTime) {
     if (!url) { Logger.log(`URL記録なし、スキップ: ${workId || '(不明)'}`); continue; }
 
     Logger.log(`▼ 次の作品: ${label}`);
-    if (prepareContinuation(url)) return markBatchStarted_(props); // 新着あり → FETCHING
-    // 新着なし → 次の作品へ
+    let contPrepared = false;
+    try { contPrepared = prepareContinuation(url); }
+    catch(e) { Logger.log(`続き取得の準備に失敗、スキップ: ${label} / ${e}`); }
+    if (contPrepared) return markBatchStarted_(props); // 新着あり → FETCHING
+    // 新着なし・失敗 → 次の作品へ
   }
   return BATCH_EXHAUSTED;
 }
@@ -1846,6 +1861,7 @@ function resetAll() {
   }
 
   clearRunState(props); // run状態のみ消す。続き取得記録(RESUME)は残す
+  props.deleteProperty('PHASE'); // 次に新しい PHASE を立てない唯一の箇所なので、ここだけ明示的に消す
   ['BATCH_MODE', 'BATCH_KIND', 'BATCH_QUEUE', 'BATCH_TOTAL', 'BATCH_FETCHED', 'BATCH_SEEDED'].forEach(k => props.deleteProperty(k));
   Logger.log('リセット完了（途中状態を消去）。startFetch / startContinuation を再実行してください。');
   Logger.log('※ 続き取得記録は保持しています。記録も消すなら clearResumeRecord を実行してください。');

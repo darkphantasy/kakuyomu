@@ -53,6 +53,8 @@ FAIL 行と「期待 / 実際」を読んで、**テストの期待値が古い�
 | 設計判断 | テスト |
 |---|---|
 | `batchStartNext` 前に `PHASE` を空にしない（画面が待機中で止まる） | `test_active_gap.js` |
+| `clearRunState` は `PHASE` を消さない（削除〜再設定の窓で誤って「待機中」判定されない） | `test_active_gap.js` |
+| `batchStartNext` の各キュー項目は例外に強い（1件の失敗で一括処理全体を止めない） | `test_batch_resilience.js` |
 | 一括の新着確認をリクエスト内でやらない・k / N の進捗・結果 1 行 | `test_batch_phase.js`, `test_batch_ui.js`, `test_e2e_pipeline.js` |
 | 選択登録も同じキュー(`mode:'seed'`)を使い、目次取得をリクエスト内でやらない | `test_seed_selected.js`, `test_seed_ui.js` |
 | 開始直後の 1 枠目をクライアントが蹴る（kick） | `test_kick_ui.js`, `test_e2e_pipeline.js` |

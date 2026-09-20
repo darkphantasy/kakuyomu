@@ -131,5 +131,21 @@ vm.runInContext('finishRun(PropertiesService.getScriptProperties(), "100", ["DOC
 check('PHASE=BATCH_NEXT', propsStore.PHASE, 'BATCH_NEXT');
 check('この経路なら active:true のまま', vm.runInContext('webGetState().running.active', sandbox), true);
 
+// clearRunState は多くの箇所で「消してすぐ新しい PHASE を立てる」という使われ方をする。
+//   PHASE も一緒に deleteProperty してしまうと、削除〜再設定の間（別々の PropertiesService
+//   呼び出し）に PHASE が一瞬存在しない窓ができ、そこに webGetState のポーリングが重なると
+//   「待機中」と誤判定されてポーリングが永久に止まる（今回の一連の不具合と同じ形）。
+console.log('\n■ clearRunState は PHASE を消さない（削除〜再設定の間に一瞬 PHASE が空になる窓を作らない）');
+propsStore = { PHASE: 'BUILD', WORK_ID: '1', TITLE: 'x', DOC_IDS: '[]', BUILD_CURSOR: '10' };
+vm.runInContext('clearRunState(PropertiesService.getScriptProperties())', sandbox);
+check('PHASE はそのまま残る（他の run 状態キーは消える）',
+  [propsStore.PHASE, 'WORK_ID' in propsStore, 'DOC_IDS' in propsStore, 'BUILD_CURSOR' in propsStore],
+  ['BUILD', false, false, false]);
+
+console.log('\n■ resetAll は「本当に待機中へ戻す」唯一の経路なので PHASE も明示的に消す');
+propsStore = { PHASE: 'FETCHING', WORK_ID: '1', TITLE: 'x' };
+vm.runInContext('resetAll()', sandbox);
+check('PHASE も消える（次に新しい PHASE を立てないので、ここだけは消してよい）', 'PHASE' in propsStore, false);
+
 console.log(`\n合計: ${pass} 件成功 / ${fail} 件失敗\n`);
 process.exit(fail ? 1 : 0);

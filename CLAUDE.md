@@ -29,7 +29,7 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 ## 用語
 
 - **記録** … Script Properties の `RESUME_<workId>`。作品ごとの永続状態(正のデータ)。索引シートはここから生成される表示物
-- **run** … 1 回の取得実行(FETCHING→BUILD→完了)。状態は `RUN_STATE_KEYS` のプロパティ群
+- **run** … 1 回の取得実行(FETCHING→BUILD→完了)。状態は `PHASE` と `RUN_STATE_KEYS` のプロパティ群
 - **一括続き取得** … 全記録をキューに積んで 1 作品ずつ続き取得すること
 - **選択登録** … カクヨムの閲覧履歴・未読あり一覧から選んだ作品をまとめて一覧に追加すること(後述)
 - **話数** … 作品の総話数(記録の `total`)。**次話** … 読み残しの最前線の話番号(Web UI の列。後述)
@@ -62,7 +62,7 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 - **一括続き取得**(`startContinuationAll` / `webStartContinuationAll`): 全記録をキューに積み 1 作品ずつ完走→次へ。新着なしはスキップ。記録が 1 件も無ければ索引シートから復元(`rebuildRecordsFromSheet`)してから回す。**開始側は `startBatch_` でキュー・`BATCH_TOTAL`・`PHASE_BATCH_NEXT` を立てて即座に返すだけ**で、新着確認(目次取得)はしない。確認〜取得は `continuesFetch` の `BATCH_NEXT` 分岐が `batchStartNext(props, startTime)` で行う。返り値は 3 値: `BATCH_STARTED`(新着ありの作品で run 状態をセット済み→そのまま `runFetchPhase`)/ `BATCH_EXHAUSTED`(キューを使い切った→`finishBatch_` して DONE)/ `BATCH_DEFERRED`(確認の途中で `TIMEOUT_THRESHOLD_MS` 超過。トリガー張り直し済みで `PHASE` は `BATCH_NEXT` のまま。次の実行枠で続きから確認)。キューは 1 作品取り出すごとに保存するので、中断してもやり直しにならない。`finishBatch_` は結果 1 行(`一括続き取得 完了（HH:MM）: 確認 N 作品・新着あり M 作品`。選択登録ぶんがあれば末尾に`・登録 K 作品`を足す)を `BATCH_RESULT` に残し、`BATCH_MODE/KIND/QUEUE/TOTAL/FETCHED/SEEDED` を消す。
 - **選択登録**(`webSeedSelected`): カクヨムの閲覧履歴・未読あり一覧(`kaku_scraping/tools/extract_antenna_list.js` をブラウザのコンソールで実行して抽出)から選んだ作品をまとめて一覧に追加する。**一括続き取得と全く同じキュー(`BATCH_QUEUE`/`PHASE_BATCH_NEXT`/`batchStartNext`)を、要素の `mode:'seed'` で使い回す**(新しい状態機械を作らない)。`batchStartNext` は `mode:'seed'` のエントリを見つけると `seedResumeRecordAt_(url, [], readCount)` で目次だけ取得して記録を保存し(本文取得はしない)、run 状態はセットせず次のキュー項目へ進む(`fetch`/`cont` と違い `BATCH_STARTED` を返さない)。`readCount`(そこまでは取得済みとして記録する話数。カクヨム側の「全話数 − 未読話数」)を渡すと既読分を続き取得の対象から外せる。索引シートの更新は 1 件ごとではなく `finishBatch_` で 1 回だけ行う。`startBatch_` の第 3 引数 `kind`(`'cont'`(既定) / `'seed'`)は `BATCH_KIND` に入り、Web UI の進捗文言だけに使う。
 - **自動キューイング**: run は単一スロットで同時実行不可。`startFetch` / `startContinuation` / `startContinuationAll` / `webSeedSelected` は実行中なら**エラーにせず `enqueueWork_` または `pushBatchQueue_` でキュー末尾に積む**(`BATCH_MODE='1'` を立て、`BATCH_TOTAL` も積んだ件数だけ増やす)。完了時は `finishRun` のバッチ分岐が次を取り出す。キュー要素は `{url, mode:'fetch'|'cont'|'seed', startEpisode?, endEpisode?, readCount?}`。旧形式(workId 文字列)も `normalizeQueueEntry_` が続き取得として受理する。`prepareFetch` / `prepareContinuation` は run 状態をセットして true を返すだけで、起動(`continuesFetch` かトリガー)は呼び出し側が行う。
-- **完了処理**(`finishRun`): バッファ掃除 → 記録保存 → サイズキャッシュ無効化 → 索引シート再生成 → run 状態クリア → バッチなら次へ(残り 60 秒以上なら同一枠で `batchStartNext` を直結、足りなければトリガーに回す。直結の結果が `BATCH_DEFERRED` ならそのまま return、`BATCH_EXHAUSTED` なら `finishBatch_` して DONE)。**`clearRunState` で `PHASE` が消えるので、バッチを続ける場合は `batchStartNext` を呼ぶ前に必ず `PHASE_BATCH_NEXT` を立てる**(下記の再発防止を参照)。
+- **完了処理**(`finishRun`): バッファ掃除 → 記録保存 → サイズキャッシュ無効化 → 索引シート再生成 → run 状態クリア → バッチなら次へ(残り 60 秒以上なら同一枠で `batchStartNext` を直結、足りなければトリガーに回す。直結の結果が `BATCH_DEFERRED` ならそのまま return、`BATCH_EXHAUSTED` なら `finishBatch_` して DONE)。`clearRunState` は `PHASE` を消さない(下記の再発防止を参照)が、それでもバッチを続ける場合は `batchStartNext` を呼ぶ前に必ず `PHASE_BATCH_NEXT` を明示的に立てる(表示上の phase 文言を正しくするため)。
 - **索引シート**(`updateIndexSpreadsheet`): 全記録から毎回再生成。列は「短縮作品名 / 作品タイトル / 話数 / ファイル数 / 最終更新 / 元URL / ファイル1..N」。短縮作品名は表示専用で、復元(`parseIndexSheetRow_`)には使わない。**列を増減させたら必ず `parseIndexSheetRow_` の列番号も直す**。並び順は `compareWorksForDisplay_`(索引・Web UI 共通。最終更新降順 → タイトル → 作品ID。`updatedAt` は分単位なので同値が普通に起き、タイブレークが無いと行が入れ替わる)。ID は `INDEX_SHEET_ID`、タブ名は `INDEX_SHEET_TAB_NAME`。索引シートは**記録の復旧手段**(`rebuildRecordsFromSheet` / `syncResumeRecordsFromSheet`)でもあるので廃止しない。
 - **ファイル名短縮**(`shortenTitleForFileName_`): `createBuildDoc` が Drive の**ファイル名にのみ**使う。本文見出し・記録・索引・フッターは常に正タイトル。ルールベース: ①「本題 〜サブタイトル〜」を除去(`〜` U+301C と `～` U+FF5E は別コードポイント。両対応)、②`【】［］（）` の注記を除去、③ `SHORT_FILENAME_MAX_LEN`(30)超なら読点区切り、無ければ機械的トリミング+「…」。既知の制約(不自然な切れ方・一意性低下)は許容済み。ON/OFF は Script Property `SHORT_FILENAME`(既定 ON)。
 
@@ -102,7 +102,8 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 
 ## データモデル(Script Properties)
 
-- `RUN_STATE_KEYS` のキー … 実行中の一時状態。`clearRunState` で消える。
+- `RUN_STATE_KEYS` のキー … 実行中の一時状態。`clearRunState` で消える(`PHASE` は含まない。下記の再発防止を参照)。
+- `PHASE` … 実行中の進行段階(`FETCHING`/`BUILD`/`BATCH_NEXT`/`DONE`)。`clearRunState` では消えない。本当に消す(=待機中に戻す)のは `resetAll` と、`continuesFetch` が `PHASE_DONE` を見て後始末するときだけ。
 - `RESUME_<workId>` … 記録 `{title,url,total,lastEpisodeId,docIds,lastCursor,updatedAt}`。`lastCursor` は参考値で位置決定には使わない。`updatedAt` は `'yyyy-MM-dd HH:mm'`(分単位)。
 - `BATCH_MODE` / `BATCH_QUEUE` … 順番待ちキュー(RUN_STATE_KEYS 外。作品完了で消えない)。
 - `BATCH_KIND` … 進行中の一括処理の種別(`'cont'`=一括続き取得 / `'seed'`=選択登録)。Web UI の進捗文言の分岐にのみ使う(処理そのものは `mode` がキュー要素ごとに持つので、混在しても実害はない)。
@@ -139,6 +140,8 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 - `refreshChangedWorks` のサイズ取得を次話側の dedup に巻き込まない(上記)。
 - 待機中の常時ポーリングを復活させない。`visibilitychange` で無条件に `refresh()` しない。
 - **`batchStartNext` を呼ぶ前に `PHASE` を空のままにしない**。この関数は目次取得(ネットワーク・新着無しの作品は読み飛ばすので長い)を伴い、その間 `PHASE` が無いと `isRunActive_` が false → Web UI が「待機中」と判断してポーリングを永久に止める。`finishRun` のバッチ分岐は呼ぶ直前に、開始側(`startContinuationAll` / `webStartContinuationAll`)は `startBatch_` の中で `PHASE_BATCH_NEXT` を立てている(2026-09 の「取得状況が画面更新されない」不具合の原因)。
+- **`clearRunState` は `PHASE` を deleteProperty しない**(`RUN_STATE_KEYS` に含めない)。`clearRunState` の呼び出し側は直後にほぼ必ず新しい `PHASE` を `setProperties` で立て直すが、`PropertiesService` はキーごとに別々の API 呼び出しになるため、`PHASE` も一緒に消してしまうと削除〜再設定の間に `PHASE` が一瞬存在しない窓ができる。この窓に別の Web リクエスト(`webGetState` のポーリング)が重なると `isRunActive_` が false と誤判定され、Web UI が「待機中」と誤解してポーリングを永久に止める(一度止まると手動更新まで戻らないため、「順番待ちは残っているのに待機中のまま画面が固まる」不具合として表面化する。2026-09、選択登録の一括処理を長時間回した際に発見)。本当に `PHASE` ごと消したい箇所(`resetAll`。次に新しい `PHASE` を立てない唯一の経路)は呼び出し側で明示的に `deleteProperty('PHASE')` する。`test_active_gap.js` で `clearRunState` 後も `PHASE` が残ることを検証している。
+- **`batchStartNext` の `mode:'fetch'`/`'cont'` 分岐は `prepareFetch`/`prepareContinuation` を try/catch で包む**(`'seed'` 分岐は元から包んでいた)。ネットワークエラー等でここが素の例外を投げると `continuesFetch()` 全体が異常終了し、`ensureTriggerAfter()` に届かないまま次のトリガーが張られず、一括処理がキューを残したまま完全に停止する。1 件失敗しても丸ごと止めず、ログに残して次のキュー項目へ進む。`test_batch_resilience.js` で検証している。
 - **Web リクエストの中で新着確認(目次取得)をしない**。`webStartContinuationAll` が `batchStartNext` を直接呼んでいた頃は、全作品に新着が無いと応答が数分返らず、その間ボタンはグレーアウト・表示は「待機中」のまま止まった。確認は必ず `continuesFetch` の `BATCH_NEXT` 分岐(トリガー実行)で行い、リクエストは `startBatch_` + `ensureTriggerAfter` で即座に返す。
 - `refresh()` の成功ハンドラでは**次回の予約を `render()` より先に行う**。逆順にすると描画中の 1 回の例外でポーリングが二度と再開しない。
 - `FETCH_PARALLEL` / `FETCH_SLEEP_MS` を速度目的で変えない。
