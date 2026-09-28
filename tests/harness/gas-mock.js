@@ -17,6 +17,7 @@
 //   triggers     … 登録中のトリガー（ハンドラ関数名の配列）
 //   batchUpdates … Docs.batchUpdate の記録 [{id, n}]
 //   sheetOps     … 索引シートへの操作名の記録
+//   sheetRows    … 索引スプレッドシートのタブ名 → 最後に setValues した2次元配列
 //   htmlByUrl    … UrlFetchApp が返す HTML（url → html。無ければ 404）
 //   cache        … CacheService の中身
 //   logs         … Logger.log の記録
@@ -60,7 +61,7 @@ function registerWork(htmlByUrl, workId, title, n) {
 function createGasSandbox(opts = {}) {
   const state = {
     props: {}, files: {}, docs: {}, createdDocs: 0, triggers: [],
-    batchUpdates: [], sheetOps: [], htmlByUrl: opts.htmlByUrl || {}, cache: {}, logs: [],
+    batchUpdates: [], sheetOps: [], sheetRows: {}, htmlByUrl: opts.htmlByUrl || {}, cache: {}, logs: [],
   };
 
   const propsApi = {
@@ -97,18 +98,30 @@ function createGasSandbox(opts = {}) {
     createFile: (name, content) => { state.files[name] = content; return makeFile(name); },
   };
 
-  const sheet = {
-    getName: () => '索引', setName() {}, getFilter: () => null, clear() { state.sheetOps.push('clear'); },
-    getMaxColumns: () => 26, getMaxRows: () => 1000, insertColumnsAfter() {}, insertRowsAfter() {},
-    deleteColumns() {}, deleteRows() {}, setFrozenRows() {}, setColumnWidth() {}, setColumnWidths() {},
-    getRange: () => {
-      const r = { setValues() { state.sheetOps.push('setValues'); return r; }, getValues: () => [],
-        setBackground: () => r, setFontColor: () => r, setFontWeight: () => r, setHorizontalAlignment: () => r, createFilter: () => r };
-      return r;
-    },
-    getLastRow: () => 1, getLastColumn: () => 7, getDataRange: () => ({ getValues: () => [] }),
+  // 索引スプレッドシートのタブ。名前ごとに別の実体を持ち、最後に書き込んだ行を state.sheetRows[名前] に残す。
+  function makeSheet(name) {
+    const sh = {
+      getName: () => name, setName(n) { delete sheets[name]; name = n; sheets[n] = sh; },
+      getFilter: () => null, clear() { state.sheetOps.push('clear'); },
+      getMaxColumns: () => 26, getMaxRows: () => 1000, insertColumnsAfter() {}, insertRowsAfter() {},
+      deleteColumns() {}, deleteRows() {}, setFrozenRows() {}, setColumnWidth() {}, setColumnWidths() {},
+      getRange: () => {
+        const r = { setValues(v) { state.sheetOps.push('setValues'); state.sheetRows[name] = v; return r; }, getValues: () => [],
+          setBackground: () => r, setFontColor: () => r, setFontWeight: () => r, setHorizontalAlignment: () => r, createFilter: () => r };
+        return r;
+      },
+      getLastRow: () => 1, getLastColumn: () => 7, getDataRange: () => ({ getValues: () => [], getFormulas: () => [] }),
+    };
+    return sh;
+  }
+  const sheets = { '索引': null };
+  sheets['索引'] = makeSheet('索引');
+  const ss = {
+    getId: () => 'SS1', getUrl: () => 'u',
+    getSheetByName: n => sheets[n] || null,
+    getSheets: () => Object.keys(sheets).map(k => sheets[k]),
+    insertSheet: n => { state.sheetOps.push('insertSheet:' + n); sheets[n] = makeSheet(n); return sheets[n]; },
   };
-  const ss = { getId: () => 'SS1', getUrl: () => 'u', getSheetByName: () => sheet, getSheets: () => [sheet], insertSheet: () => sheet };
 
   const httpResponse = (url, opt) => {
     const hooked = opts.fetch && opts.fetch(url, opt);

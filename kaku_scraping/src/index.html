@@ -141,6 +141,7 @@
       <div class="tabbar">
         <button type="button" class="tab-btn" data-tab="works" onclick="setActiveTab('works')">一覧 <span id="tabWorksCount" class="tab-count"></span></button>
         <button type="button" class="tab-btn" data-tab="seed" onclick="setActiveTab('seed')">候補から選んで登録 <span id="tabSeedCount" class="tab-count"></span></button>
+        <button type="button" class="tab-btn" data-tab="removed" onclick="setActiveTab('removed')">削除済み <span id="tabRemovedCount" class="tab-count"></span></button>
       </div>
 
       <div class="card" id="tabPanel-works">
@@ -224,6 +225,27 @@
         <div id="seedEmpty" class="empty">候補がまだありません。</div>
       </div>
 
+      <div class="card" id="tabPanel-removed" hidden>
+        <h2>削除済み <span id="removedCount" style="color:var(--muted);font-weight:400"></span></h2>
+        <p style="font-size:12px;color:var(--muted);margin:0 0 8px">
+          一覧から削除した（取得を停止した）作品です。ここにある作品を「初回取得」「一覧に追加」「候補から選んで登録」しようとすると、
+          始める前に確認が出ます（確認すればそのまま続けられます）。再登録・再取得するとこのリストから自動で外れます。
+          索引スプレッドシートの「削除済み」シートにも同じ内容が出ます。
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>作品</th>
+              <th class="num">削除時点の話数</th>
+              <th class="hide-sp">削除日時</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="removedList"></tbody>
+        </table>
+        <div id="removedEmpty" class="empty">削除済みの作品はありません。</div>
+      </div>
+
       <div class="card">
         <h2>設定・その他</h2>
         <div class="btns" style="margin-top:0">
@@ -249,7 +271,8 @@
       // 「一覧」「候補から選んで登録」はタブ切り替え（画面下部までスクロールしないでも
       //   候補一覧に届くようにするため）。自動更新のたびに選択タブが戻らないよう、
       //   ここに状態を持つだけで render() 側からは触らない。
-      var activeTab = 'works'; // 'works' | 'seed'
+      var activeTab = 'works'; // 'works' | 'seed' | 'removed'
+      var TAB_NAMES = ['works', 'seed', 'removed'];
 
       function setActiveTab(tab) {
         activeTab = tab;
@@ -262,8 +285,9 @@
           var isActive = btns[i].getAttribute('data-tab') === activeTab;
           btns[i].className = 'tab-btn' + (isActive ? ' active' : '');
         }
-        $('tabPanel-works').hidden = (activeTab !== 'works');
-        $('tabPanel-seed').hidden = (activeTab !== 'seed');
+        for (var j = 0; j < TAB_NAMES.length; j++) {
+          $('tabPanel-' + TAB_NAMES[j]).hidden = (activeTab !== TAB_NAMES[j]);
+        }
       }
 
       // ドキュメントサイズと次話は webGetState とは別経路で問い合わせ、ここに溜める。
@@ -539,12 +563,21 @@
       }
 
       // サーバー関数を呼び、{ok,message} を受け取って表示・再描画する
+      //   needConfirm が返ったら（一覧から削除した作品を取得・登録しようとした等）、message で
+      //   確認し、OK なら同じ関数を末尾に confirmed=true を足して呼び直す。キャンセルなら何もしない。
+      //   ※ 呼び直しは引数の末尾に足すので、確認を返す web* 関数には省略可能な引数も含めて
+      //     全部渡すこと（webStartFetch は [url, startEp, endEp] の 3 つ）。
       function call(fnName, args, okMsgPrefix) {
         if (busy) return;
         setBusy(true);
         var runner = google.script.run
           .withSuccessHandler(function (res) {
             setBusy(false);
+            if (res && res.needConfirm) {
+              if (confirm(res.message)) call(fnName, (args || []).concat([true]), okMsgPrefix);
+              else log((okMsgPrefix || '') + '取り消しました。');
+              return;
+            }
             if (res && res.ok === false) log((okMsgPrefix || '') + (res.message || '失敗しました。'), true);
             else log((okMsgPrefix || '') + ((res && res.message) || '完了しました。'));
             if (res && res.kick) kick();
@@ -641,6 +674,7 @@
 
         renderTable();
         renderSeedList();
+        renderRemovedList();
       }
 
       // 並び替えの比較。第1キーが同値のときはタイトル・作品IDまで見て順序を固定する
@@ -759,7 +793,7 @@
           bDel.className = 'mini danger';
           bDel.textContent = '削除';
           bDel.onclick = function () {
-            if (!confirm('「' + w.title + '」を一覧から外します。\n（取得済みドキュメント自体は削除されません）')) return;
+            if (!confirm('「' + w.title + '」を一覧から外します。\n（取得済みドキュメント自体は削除されません）\n\n外した作品は「削除済み」タブに記録され、あとで取得・登録しようとすると確認が出ます。')) return;
             call('webClearResumeRecord', [w.url], '［' + w.shortTitle + '］');
           };
 
@@ -825,13 +859,23 @@
         renderSeedList();
       }
 
-      // 未読があり、まだ一覧に登録されていない候補をまとめて選択する
+      // 削除済みリスト（一覧から削除した作品）を workId -> 記録 の形で引く
+      function removedMap_() {
+        var m = {};
+        if (lastState && lastState.removed) lastState.removed.forEach(function (r) { m[r.workId] = r; });
+        return m;
+      }
+
+      // 未読があり、まだ一覧に登録されていない候補をまとめて選択する。
+      //   以前に一覧から削除した作品は選ばない（読むのをやめた作品を取り直さないため。
+      //   必要なら手動でチェックできる。登録時にも確認が出る）。
       function doSelectUnreadSeed() {
         var registered = {};
         if (lastState) lastState.works.forEach(function (w) { registered[w.workId] = true; });
+        var removed = removedMap_();
         Object.keys(seedCandidates).forEach(function (workId) {
           var c = seedCandidates[workId];
-          if (!registered[workId] && c.unread > 0) c.checked = true;
+          if (!registered[workId] && !removed[workId] && c.unread > 0) c.checked = true;
         });
         renderSeedList();
       }
@@ -879,6 +923,7 @@
         tb.textContent = '';
         var registered = {};
         if (lastState) lastState.works.forEach(function (w) { registered[w.workId] = true; });
+        var removed = removedMap_();
 
         var workIds = Object.keys(seedCandidates);
         $('seedEmpty').style.display = workIds.length ? 'none' : 'block';
@@ -924,13 +969,66 @@
           tdStart.appendChild(startInput);
 
           var tdStatus = document.createElement('td');
-          tdStatus.textContent = isRegistered ? '登録済み' : '';
+          var rm = removed[workId];
+          tdStatus.textContent = isRegistered ? '登録済み'
+            : rm ? ('削除済み（' + (rm.removedAt || '').slice(0, 10) + '・' + rm.total + ' 話まで取得済み）')
+            : '';
+          if (!isRegistered && rm) tdStatus.style.color = 'var(--danger)';
 
           tr.appendChild(tdChk);
           tr.appendChild(tdTitle);
           tr.appendChild(tdCount);
           tr.appendChild(tdStart);
           tr.appendChild(tdStatus);
+          tb.appendChild(tr);
+        });
+      }
+
+      // 削除済みタブの描画（lastState.removed。サーバーは呼ばない）
+      function renderRemovedList() {
+        var list = (lastState && lastState.removed) || [];
+        var tb = $('removedList');
+        tb.textContent = '';
+        $('removedEmpty').style.display = list.length ? 'none' : 'block';
+        $('removedCount').textContent = list.length ? '(' + list.length + ' 作品)' : '';
+        $('tabRemovedCount').textContent = list.length ? '(' + list.length + ')' : '';
+
+        list.forEach(function (r) {
+          var tr = document.createElement('tr');
+
+          var tdTitle = document.createElement('td');
+          var a = document.createElement('a');
+          a.className = 'title-short';
+          a.href = r.url; a.target = '_blank';
+          a.textContent = r.shortTitle || r.title; // 外部由来のテキストは textContent で描画する
+          var full = document.createElement('div');
+          full.className = 'title-full';
+          full.textContent = r.title;
+          tdTitle.appendChild(a);
+          tdTitle.appendChild(full);
+
+          var tdTotal = document.createElement('td');
+          tdTotal.className = 'num';
+          tdTotal.textContent = r.total + ' 話';
+
+          var tdAt = document.createElement('td');
+          tdAt.className = 'hide-sp';
+          tdAt.textContent = r.removedAt;
+
+          var tdAct = document.createElement('td');
+          var bForget = document.createElement('button');
+          bForget.className = 'mini';
+          bForget.textContent = 'リストから外す';
+          bForget.onclick = function () {
+            if (!confirm('「' + r.title + '」を削除済みリストから外します。\n以後この作品を取得・登録しても確認は出なくなります。')) return;
+            call('webForgetRemoved', [r.workId], '［' + (r.shortTitle || r.title) + '］');
+          };
+          tdAct.appendChild(bForget);
+
+          tr.appendChild(tdTitle);
+          tr.appendChild(tdTotal);
+          tr.appendChild(tdAt);
+          tr.appendChild(tdAct);
           tb.appendChild(tr);
         });
       }

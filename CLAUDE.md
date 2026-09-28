@@ -35,6 +35,7 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 - **話数** … 作品の総話数(記録の `total`)。**次話** … 読み残しの最前線の話番号(Web UI の列。後述)
 - **フェーズ機械** … Script Property `PHASE`(FETCHING / BUILD / BATCH_NEXT / DONE)で進行段階を表し、`continuesFetch()` が現在の `PHASE` に応じた処理へ振り分ける仕組み。ユーザーとの会話では「状態機械」ではなくこの語を使う
 - **蹴り(kick)** … Web UI が開始直後に `webKick()` を呼び、トリガーの発火を待たずに 1 枠目を走らせること(後述)
+- **削除済みリスト** … Script Properties の `REMOVED_<workId>`。一覧から削除した(=取得を停止した)作品。再取得・再登録の前に確認を出すために使う(後述)
 
 ## 実行環境と制約(最重要)
 
@@ -64,6 +65,7 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 - **自動キューイング**: run は単一スロットで同時実行不可。`startFetch` / `startContinuation` / `startContinuationAll` / `webSeedSelected` は実行中なら**エラーにせず `enqueueWork_` または `pushBatchQueue_` でキュー末尾に積む**(`BATCH_MODE='1'` を立て、`BATCH_TOTAL` も積んだ件数だけ増やす)。完了時は `finishRun` のバッチ分岐が次を取り出す。キュー要素は `{url, mode:'fetch'|'cont'|'seed', startEpisode?, endEpisode?, readCount?}`。旧形式(workId 文字列)も `normalizeQueueEntry_` が続き取得として受理する。`prepareFetch` / `prepareContinuation` は run 状態をセットして true を返すだけで、起動(`continuesFetch` かトリガー)は呼び出し側が行う。
 - **完了処理**(`finishRun`): バッファ掃除 → 記録保存 → サイズキャッシュ無効化 → 索引シート再生成 → run 状態クリア → バッチなら次へ(残り 60 秒以上なら同一枠で `batchStartNext` を直結、足りなければトリガーに回す。直結の結果が `BATCH_DEFERRED` ならそのまま return、`BATCH_EXHAUSTED` なら `finishBatch_` して DONE)。`clearRunState` は `PHASE` を消さない(下記の再発防止を参照)が、それでもバッチを続ける場合は `batchStartNext` を呼ぶ前に必ず `PHASE_BATCH_NEXT` を明示的に立てる(表示上の phase 文言を正しくするため)。
 - **索引シート**(`updateIndexSpreadsheet`): 全記録から毎回再生成。列は「短縮作品名 / 作品タイトル / 話数 / ファイル数 / 最終更新 / 元URL / ファイル1..N」。短縮作品名は表示専用で、復元(`parseIndexSheetRow_`)には使わない。**列を増減させたら必ず `parseIndexSheetRow_` の列番号も直す**。並び順は `compareWorksForDisplay_`(索引・Web UI 共通。最終更新降順 → タイトル → 作品ID。`updatedAt` は分単位なので同値が普通に起き、タイブレークが無いと行が入れ替わる)。ID は `INDEX_SHEET_ID`、タブ名は `INDEX_SHEET_TAB_NAME`。索引シートは**記録の復旧手段**(`rebuildRecordsFromSheet` / `syncResumeRecordsFromSheet`)でもあるので廃止しない。
+- **削除済みリスト**(`REMOVED_<workId>`): 一覧から削除した作品を覚えておき、再取得・再登録の前に確認を出す(既読の作品を取り直さないため)。値は `{title,url,total,docIds,removedAt}`(`total` は削除時点の取得済み話数)。**`RESUME_` と `REMOVED_` に同じ作品が同時に載ることはない**: 削除(`clearResumeRecord`、および `syncResumeRecordsFromSheet` でシートから行が消えた作品)で `markRemoved_` → `RESUME_` を消す、の順に移し、**`saveResumeRecord` が保存のたびに `REMOVED_` を消す**(再登録・再取得の完了で自動的に外れる。取得中はまだ残る)。確認は Web の入口だけ: `webStartFetch`(初回取得のみ。続き取得は一覧にある作品が対象なので不要)・`webSeedResumeRecord`・`webSeedSelected` が、削除済みの作品を含むと処理を始める前に `{ok:false, needConfirm:true, message}`(`removedConfirm_`)を返す。**順番待ちに積む前に確認する**(積んだ後では聞けない)。クライアントの `call()` が `confirm(message)` し、OK なら同じ関数を**引数の末尾に `confirmed=true` を足して**呼び直す(そのため確認を返す `web*` には省略可能な引数も全部渡す)。GAS エディタからの `startFetch` / `seedResumeRecord` はログに警告(`logRemovedWarning_`)を出すだけで続行する。手動で外すのは `webForgetRemoved`。過去の削除ぶんは遡って記録しない(この機能を入れた時点から空で始める)。索引スプレッドシートの「削除済み」タブ(`REMOVED_SHEET_TAB_NAME`、`writeRemovedSheet_`)は `updateIndexSpreadsheet` が毎回作り直す表示専用で、復元には使わない。書き込みに失敗しても索引本体の更新は済ませる(try/catch)。
 - **ファイル名短縮**(`shortenTitleForFileName_`): `createBuildDoc` が Drive の**ファイル名にのみ**使う。本文見出し・記録・索引・フッターは常に正タイトル。ルールベース: ①「本題 〜サブタイトル〜」を除去(`〜` U+301C と `～` U+FF5E は別コードポイント。両対応)、②`【】［］（）` の注記を除去、③ `SHORT_FILENAME_MAX_LEN`(30)超なら読点区切り、無ければ機械的トリミング+「…」。既知の制約(不自然な切れ方・一意性低下)は許容済み。ON/OFF は Script Property `SHORT_FILENAME`(既定 ON)。
 
 ## Web UI(唯一の操作インターフェース)
@@ -78,7 +80,7 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 - **ポーリングは取得操作を実行している間だけ**(`scheduleNextRefresh`): `webGetState` の応答で `running.active` が true の間だけ `POLL_MS`(7 秒)後の次回を予約する自走方式。**待機中は次回を予約せず完全に止まる**。再開のきっかけはボタン操作(`call()` 成功時の `refresh()`)・「今すぐ更新」・ページ再読み込み。失敗時は状態不明なので `POLL_MS` 後に 1 回再試行。Web UI の外(GAS エディタ)から開始した run には、リロードかボタン操作まで気づかない(許容済み)。
 - **バックグラウンドタブ対策**(`visibilitychange`): ブラウザは非表示タブのタイマーを間引くため、実行中に離席すると完了に気づけないまま止まる。**タブが隠れた瞬間に `running.active` だった場合だけ**、再表示時に `refresh()` を 1 回実行して追いつく。待機中のタブ切り替えでは何も起きない(無条件に `refresh()` すると、離席中に完了した作品の次話・サイズ問い合わせがタブを見せるたびにまとめて走る)。
 - **並び替え・絞り込みはクライアント側だけで完結**(`renderTable` / `compareWorks`)。設定は `view` に保持し自動更新で失われない。同値時はタイトル・作品IDでタイブレーク。`total` は文字列で来るので `Number()` してから比較する。「未読のみ表示」(`#unreadOnly`)は `readingEp[workId] === 'latest'` の作品を除外するだけで、判定中(未取得)の作品は除外しない。
-- **「一覧」「候補から選んで登録」はタブ切り替え**: 候補一覧が画面下部にあって参照しづらかったため、2枚のカード(`#tabPanel-works` / `#tabPanel-seed`)をタブ化した。`activeTab`(クライアント側変数)を `setActiveTab(tab)` で切り替え、`renderTabs()` が `.tab-btn` の `active` クラス付け替えと対象パネルの `hidden` を同期する。**`render()` からは触らない**(自動更新のたびに選択タブへ戻ると使いにくいため、ポーリングと無関係に保持する)。タブ見出しの件数(`#tabWorksCount` / `#tabSeedCount`)は `renderTable()` / `renderSeedList()` がそれぞれ自分の描画のついでに更新する。状態行・ログ・「取得」「設定・その他」カードはタブの外(常時表示)。
+- **「一覧」「候補から選んで登録」「削除済み」はタブ切り替え**: 候補一覧が画面下部にあって参照しづらかったため、カード(`#tabPanel-works` / `#tabPanel-seed` / `#tabPanel-removed`。`TAB_NAMES`)をタブ化した。`activeTab`(クライアント側変数)を `setActiveTab(tab)` で切り替え、`renderTabs()` が `.tab-btn` の `active` クラス付け替えと対象パネルの `hidden` を同期する。**`render()` からは触らない**(自動更新のたびに選択タブへ戻ると使いにくいため、ポーリングと無関係に保持する)。タブ見出しの件数(`#tabWorksCount` / `#tabSeedCount` / `#tabRemovedCount`)は `renderTable()` / `renderSeedList()` / `renderRemovedList()` がそれぞれ自分の描画のついでに更新する。削除済みタブは `webGetState` の `removed` を描画するだけ(サーバーは呼ばない)。候補一覧では削除済みの作品の状態欄に「削除済み(日付・N 話まで取得済み)」と出し、`doSelectUnreadSeed` では選ばない(手動でチェックすれば登録時に確認が出る)。状態行・ログ・「取得」「設定・その他」カードはタブの外(常時表示)。
 
 ### ドキュメントサイズ表示(参考値)
 
@@ -112,6 +114,7 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 - `BATCH_RESULT` … 直近の一括の結果 1 行。消さない(Web UI は開いている間に値が変わったときだけログに出す)。
 - `INDEX_SHEET_ID` … 索引スプレッドシートの ID。
 - `SHORT_FILENAME` … ファイル名短縮の ON/OFF(`'0'` で OFF。未設定は ON)。
+- `REMOVED_<workId>` … 削除済みリスト `{title,url,total,docIds,removedAt}`(上記)。`resetAll` では消えない。
 
 ## 書式仕様
 
@@ -123,7 +126,7 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 
 ## ユーザー向け関数(GAS エディタから実行可)
 
-`startFetch(url?, startEpisode?, endEpisode?)` / `startContinuation(url?)` / `startContinuationAll` / `seedResumeRecord(url?, existingDocIds?)`(一覧に追加) / `clearResumeRecord(url?)`(一覧から削除。ドキュメントは残る) / `syncResumeRecordsFromSheet`(索引シートの行を正として差分同期。既存作品の記録は触らない) / `rebuildRecordsFromSheet`(索引シートから全面復元。既存記録も上書き) / `checkResume(url?)` / `listResumeRecords` / `rebuildIndex` / `checkProgress` / `resetAll`(run 状態のみ消す)。URL 省略時は `KAKUYOMU_URL` にフォールバック。`START_EPISODE` / `END_EPISODE`(0=無制限)は初回取得のデバッグ用。
+`startFetch(url?, startEpisode?, endEpisode?)` / `startContinuation(url?)` / `startContinuationAll` / `seedResumeRecord(url?, existingDocIds?)`(一覧に追加) / `clearResumeRecord(url?)`(一覧から削除。ドキュメントは残る。削除済みリストに記録) / `syncResumeRecordsFromSheet`(索引シートの行を正として差分同期。既存作品の記録は触らない) / `rebuildRecordsFromSheet`(索引シートから全面復元。既存記録も上書き) / `checkResume(url?)` / `listResumeRecords` / `rebuildIndex` / `checkProgress` / `resetAll`(run 状態のみ消す)。URL 省略時は `KAKUYOMU_URL` にフォールバック。`START_EPISODE` / `END_EPISODE`(0=無制限)は初回取得のデバッグ用。
 
 ## 開発ワークフロー
 

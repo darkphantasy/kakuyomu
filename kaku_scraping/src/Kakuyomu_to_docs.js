@@ -54,6 +54,7 @@ const BATCH_DEFERRED  = 'deferred';  // 時間切れ。トリガーを張り直�
 
 const INDEX_SHEET_NAME     = '【索引】カクヨム取得作品（表）';
 const INDEX_SHEET_TAB_NAME = '索引'; // 索引スプレッドシート内のシート（タブ）名
+const REMOVED_SHEET_TAB_NAME = '削除済み'; // 同じスプレッドシート内の、一覧から削除した作品のタブ
 
 const SHORT_FILENAME_MAX_LEN = 30; // ファイル名短縮：これを超えたら読点区切り or 強制トリミング
 
@@ -140,8 +141,93 @@ function getResumeRecord(workId) {
   try { return JSON.parse(raw); } catch(e) { return null; }
 }
 
+// 記録を保存する。一覧に（再び）載った作品なので、削除済みリストにあれば外す
+//   （再登録・再取得の完了で自動的に削除済みから外れる。下の「削除済みリスト」を参照）。
 function saveResumeRecord(workId, rec) {
-  PropertiesService.getScriptProperties().setProperty(resumeKey(workId), JSON.stringify(rec));
+  const props = PropertiesService.getScriptProperties();
+  props.setProperty(resumeKey(workId), JSON.stringify(rec));
+  props.deleteProperty(removedKey(workId));
+}
+
+// ==========================================
+// 削除済みリスト（REMOVED_<workId>）
+//   一覧から削除した（＝取得を停止した）作品を覚えておき、あとで同じ作品を取得・登録しようと
+//   したときに確認を出すためのもの（既読の作品をうっかり取り直さないように）。
+//   値は {title, url, total, docIds, removedAt}。total は削除時点の取得済み話数。
+//   一覧（RESUME_）と削除済み（REMOVED_）に同じ作品が同時に載ることはない：
+//     削除（clearResumeRecord / 索引シートの行削除による同期）で RESUME_ → REMOVED_ に移り、
+//     再登録・再取得の完了（saveResumeRecord）で REMOVED_ が消える。
+//   警告は確認のためのもので、確認すれば取得・登録は続行できる。
+// ==========================================
+const REMOVED_PREFIX = 'REMOVED_';
+
+function removedKey(workId) {
+  return REMOVED_PREFIX + workId;
+}
+
+// 削除済みの全作品を [{ workId, rec }] で返す（loadResumeRecords_ と同じ形）。
+function loadRemovedRecords_(all) {
+  all = all || PropertiesService.getScriptProperties().getProperties();
+  return Object.keys(all)
+    .filter(k => k.indexOf(REMOVED_PREFIX) === 0)
+    .map(k => {
+      let rec; try { rec = JSON.parse(all[k]); } catch(e) { rec = {}; }
+      return { workId: k.substring(REMOVED_PREFIX.length), rec: rec };
+    });
+}
+
+function getRemovedRecord(workId) {
+  const raw = PropertiesService.getScriptProperties().getProperty(removedKey(workId));
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch(e) { return null; }
+}
+
+// 一覧から外す作品を削除済みリストに記録する（rec は削除直前の RESUME 記録）。
+function markRemoved_(props, workId, rec) {
+  rec = rec || {};
+  props.setProperty(removedKey(workId), JSON.stringify({
+    title:     rec.title || '',
+    url:       rec.url || '',
+    total:     Number(rec.total) || 0,
+    docIds:    rec.docIds || [],
+    removedAt: Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm'),
+  }));
+}
+
+// 削除済みの並び順（削除日時の新しい順 → タイトル → 作品ID）。索引シートと Web UI で共通。
+function compareRemovedForDisplay_(a, b) {
+  const byRemoved = (b.removedAt || '').localeCompare(a.removedAt || '');
+  if (byRemoved !== 0) return byRemoved;
+  const byTitle = (a.title || '').localeCompare(b.title || '');
+  if (byTitle !== 0) return byTitle;
+  return (a.workId || '').localeCompare(b.workId || '');
+}
+
+// URL 群のうち削除済みリストにある作品を返す（取得・登録を始める前の確認用）。
+//   返り値: [{ workId, title, url, total, removedAt }]（同じ作品は1件にまとめる）
+function findRemovedWorks_(urls) {
+  const seen = {};
+  const hits = [];
+  (urls || []).forEach(u => {
+    const workId = extractWorkId(String(u || ''));
+    if (!workId || seen[workId]) return;
+    seen[workId] = true;
+    const rec = getRemovedRecord(workId);
+    if (rec) hits.push(Object.assign({ workId: workId }, rec));
+  });
+  return hits;
+}
+
+// 削除済み作品1件ぶんの説明（「タイトル」（2026-09-28 12:00 に削除・120 話まで取得済み））
+function describeRemoved_(r) {
+  return `「${r.title || r.workId}」（${r.removedAt || '日時不明'} に削除・${Number(r.total) || 0} 話まで取得済み）`;
+}
+
+// GAS エディタから直接実行した場合は確認できないので、ログに警告だけ残して続行する。
+function logRemovedWarning_(url) {
+  findRemovedWorks_([url]).forEach(r => {
+    Logger.log(`⚠ 以前に一覧から削除した作品です: ${describeRemoved_(r)}`);
+  });
 }
 
 function clearRunState(props) {
@@ -249,8 +335,10 @@ function startFetch(url, startEpisode, endEpisode) {
       startEpisode: startEpisode, endEpisode: endEpisode,
     });
     Logger.log(`実行中の取得があるため、キューに追加しました（順番待ち ${n} 件目）。`);
+    logRemovedWarning_(url || KAKUYOMU_URL);
     return;
   }
+  logRemovedWarning_(url || KAKUYOMU_URL);
   if (prepareFetch(url, startEpisode, endEpisode)) continuesFetch();
 }
 
@@ -501,6 +589,7 @@ function seedResumeRecord(url, existingDocIds) {
     // '1AbCdEf...既存ドキュメントID...',
   ];
 
+  logRemovedWarning_(url || KAKUYOMU_URL);
   const result = seedResumeRecordAt_(url, docIds);
   if (!result) return;
   Logger.log(`現在地を記録しました:「${result.title}」${result.totalEpisodes} 話 / 既存ドキュメント ${docIds.length} 件`);
@@ -577,7 +666,50 @@ function updateIndexSpreadsheet() {
   const rows  = buildIndexRows_(records);
   writeIndexRows_(sheet, rows);
 
-  Logger.log(`索引スプレッドシートを更新: ${records.length} 作品 → ${ss.getUrl()}`);
+  // 削除済みタブは表示用の付属物。失敗しても索引本体（記録の復旧手段）の更新は済ませておく。
+  const removed = loadRemovedRecords_()
+    .map(({ workId, rec }) => Object.assign({ workId: workId }, rec))
+    .sort(compareRemovedForDisplay_);
+  try { writeRemovedSheet_(ss, removed); }
+  catch(e) { Logger.log('削除済みタブの更新エラー: ' + e); }
+
+  Logger.log(`索引スプレッドシートを更新: ${records.length} 作品（削除済み ${removed.length} 作品）→ ${ss.getUrl()}`);
+}
+
+// 削除済みタブ（索引スプレッドシート内）。一覧から削除した作品を表示する。
+//   表示専用（復元には使わない）。無ければ末尾に作る。
+function buildRemovedRows_(records) {
+  const rows = [['短縮作品名', '作品タイトル', '削除時点の話数', '削除日時', '元URL']];
+  records.forEach(r => {
+    const title = r.title || '(無題)';
+    rows.push([
+      shortenTitleForFileName_(title),
+      title,
+      Number(r.total) || 0,
+      r.removedAt || '',
+      r.url ? `=HYPERLINK("${r.url}","開く")` : '',
+    ]);
+  });
+  return rows;
+}
+
+function writeRemovedSheet_(ss, records) {
+  let sheet = ss.getSheetByName(REMOVED_SHEET_TAB_NAME);
+  if (!sheet) sheet = ss.insertSheet(REMOVED_SHEET_TAB_NAME, ss.getSheets().length);
+  sheet.clear();
+
+  const rows = buildRemovedRows_(records);
+  const cols = rows[0].length;
+  sheet.getRange(1, 1, rows.length, cols).setValues(rows);
+  sheet.getRange(1, 1, 1, cols)
+       .setBackground('#5A5A5A').setFontColor('#FFFFFF')
+       .setFontWeight('bold').setHorizontalAlignment('center');
+  sheet.setFrozenRows(1);
+  sheet.setColumnWidth(1, 200); // 短縮作品名
+  sheet.setColumnWidth(2, 340); // 作品タイトル
+  sheet.setColumnWidth(3, 110); // 削除時点の話数
+  sheet.setColumnWidth(4, 150); // 削除日時
+  sheet.setColumnWidth(5, 70);  // 元URL
 }
 
 // INDEX_SHEET_ID のスプレッドシートを開く。無い・ゴミ箱なら新規作成して ID を保存する。
@@ -810,6 +942,7 @@ function syncResumeRecordsFromSheet() {
   recordWorkIds.forEach(workId => {
     if (sheetWorks[workId]) return;
     const rec = getResumeRecord(workId);
+    markRemoved_(props, workId, rec); // 行を消すのも「一覧から削除」なので削除済みリストに残す
     props.deleteProperty(resumeKey(workId));
     Logger.log(`[削除] シートから行が消えたため一覧から除外:「${(rec && rec.title) || workId}」`);
     removed++;
@@ -879,7 +1012,8 @@ function listResumeRecords() {
 // 続き取得の一覧から作品を外す（引数省略時は KAKUYOMU_URL の作品）
 //   記録（RESUME_<workId>）を削除するだけで、取得済みの Google ドキュメント自体は削除しない。
 //   索引スプレッドシートもあわせて更新するので、実行後は一覧から消えて見える。
-//   ※ 再度追加したい場合は seedResumeRecord を実行する。
+//   外した作品は削除済みリスト（REMOVED_<workId>）に残し、再取得・再登録の前に確認を出す。
+//   ※ 再度追加したい場合は seedResumeRecord を実行する（削除済みリストからは自動で外れる）。
 // ==========================================
 function clearResumeRecord(url) {
   const targetUrl = url || KAKUYOMU_URL;
@@ -889,8 +1023,10 @@ function clearResumeRecord(url) {
   const rec = getResumeRecord(workId);
   if (!rec) { Logger.log('この作品の続き取得記録はありません。'); return; }
 
-  PropertiesService.getScriptProperties().deleteProperty(resumeKey(workId));
-  Logger.log(`続き取得の一覧から削除しました:「${rec.title || workId}」（ドキュメント自体は削除していません）`);
+  const props = PropertiesService.getScriptProperties();
+  markRemoved_(props, workId, rec);
+  props.deleteProperty(resumeKey(workId));
+  Logger.log(`続き取得の一覧から削除しました:「${rec.title || workId}」（ドキュメント自体は削除していません。削除済みリストに記録しました）`);
   try { updateIndexSpreadsheet(); } catch(e) { Logger.log('索引シート更新エラー: ' + e); }
 }
 

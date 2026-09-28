@@ -58,12 +58,28 @@ function webGetState() {
     })
     .sort(compareWorksForDisplay_); // 同分の作品が呼び出しごとに入れ替わらないよう決定的に並べる
 
+  // 削除済みリスト（一覧から削除した作品）。「削除済み」タブと、候補一覧の目印に使う
+  const removed = loadRemovedRecords_(all)
+    .map(({ workId, rec }) => {
+      const title = rec.title || '(無題)';
+      return {
+        workId:     workId,
+        title:      title,
+        shortTitle: shortenTitleForFileName_(title),
+        url:        rec.url || '',
+        total:      Number(rec.total) || 0,
+        removedAt:  rec.removedAt || '',
+      };
+    })
+    .sort(compareRemovedForDisplay_);
+
   const eps        = JSON.parse(all.EPISODES || '[]');
   const queue      = JSON.parse(all.BATCH_QUEUE || '[]');
   const batchTotal = Number(all.BATCH_TOTAL || 0);
 
   return {
-    works: works,
+    works:   works,
+    removed: removed,
     running: {
       active:    isRunActive_(props),
       phase:     all.PHASE || '',
@@ -83,14 +99,50 @@ function webGetState() {
 }
 
 // ==========================================
+// 削除済み作品の確認
+//   一覧から削除した作品を取得・登録しようとしたら、処理を始める前に
+//   { ok:false, needConfirm:true, message } を返す。クライアント（index.html の call()）は
+//   message で確認ダイアログを出し、OK なら同じ関数を末尾の引数 confirmed=true で呼び直す。
+//   確認のためのもので、続行は妨げない。順番待ちに積む前に確認する（積んだ後では聞けないため）。
+// ==========================================
+const REMOVED_CONFIRM_LIST_MAX = 10; // 確認文に並べる作品数の上限（超えたぶんは件数だけ）
+
+function removedConfirm_(hits, action, hint) {
+  const lines = hits.slice(0, REMOVED_CONFIRM_LIST_MAX).map(r => '・' + describeRemoved_(r));
+  if (hits.length > REMOVED_CONFIRM_LIST_MAX) lines.push(`ほか ${hits.length - REMOVED_CONFIRM_LIST_MAX} 作品`);
+  const head = (hits.length === 1)
+    ? '次の作品は、以前に一覧から削除した作品です。'
+    : `次の ${hits.length} 作品は、以前に一覧から削除した作品です。`;
+  return {
+    ok: false,
+    needConfirm: true,
+    message: [head].concat(lines).concat(hint ? ['', hint] : []).concat(['', `このまま${action}しますか？`]).join('\n'),
+  };
+}
+
+// ==========================================
 // 取得の開始（即応）。実行中なら順番待ちに積むだけ。
 //   mode: 'fetch'（初回取得） / 'cont'（続き取得）
+//   confirmed: 削除済み作品の確認に OK した後の呼び直しなら true（初回取得のみ確認する。
+//   続き取得は一覧にある作品が対象で、削除済みの作品は一覧に無いので確認の必要がない）
 // ==========================================
-function webStartWork_(mode, url, startEpisode, endEpisode) {
+function webStartWork_(mode, url, startEpisode, endEpisode, confirmed) {
   const targetUrl = String(url || '').trim();
   if (!targetUrl) return { ok: false, message: '作品URLを入力してください。' };
   if (!extractWorkId(targetUrl)) {
     return { ok: false, message: 'カクヨムの作品URLとして認識できません（https://kakuyomu.jp/works/... の形式）。' };
+  }
+
+  if (mode === 'fetch' && !confirmed) {
+    const hits = findRemovedWorks_([targetUrl]);
+    if (hits.length > 0) {
+      const next = (Number(hits[0].total) || 0) + 1;
+      const specified = (startEpisode === undefined || startEpisode === null || startEpisode === '') ? null : Number(startEpisode);
+      const hint = (specified != null)
+        ? `開始話数は ${specified} 話目が指定されています（削除時点の続きは ${next} 話目）。`
+        : `開始話数が未指定なので 1 話目から取得します。既読ぶんを取り直さないなら、詳細オプションの開始話数に ${next} を指定してください。`;
+      return removedConfirm_(hits, '取得', hint);
+    }
   }
 
   const props = PropertiesService.getScriptProperties();
@@ -119,8 +171,8 @@ function webStartWork_(mode, url, startEpisode, endEpisode) {
   return { ok: true, kick: true, message: '取得を開始しました。進捗はこの画面に自動反映されます。' };
 }
 
-function webStartFetch(url, startEpisode, endEpisode) {
-  return webStartWork_('fetch', url, startEpisode, endEpisode);
+function webStartFetch(url, startEpisode, endEpisode, confirmed) {
+  return webStartWork_('fetch', url, startEpisode, endEpisode, confirmed);
 }
 
 function webStartContinuation(url) {
@@ -154,8 +206,9 @@ function webStartContinuationAll() {
 //   （カクヨム側の「全話数 − 未読話数」。省略時は全話取得済み扱い＝以前からある seedResumeRecord
 //   と同じ既定）。一括続き取得と同じキュー（BATCH_QUEUE）を使い回し、mode:'seed' の要素として積む。
 //   ここでは目次取得をしない（webStartContinuationAll と同じ理由）。
+//   confirmed: 削除済み作品の確認に OK した後の呼び直しなら true。
 // ==========================================
-function webSeedSelected(items) {
+function webSeedSelected(items, confirmed) {
   items = Array.isArray(items) ? items : [];
   const entries = items
     .map(it => ({
@@ -165,6 +218,11 @@ function webSeedSelected(items) {
     }))
     .filter(e => e.url && extractWorkId(e.url));
   if (entries.length === 0) return { ok: false, message: '登録できる作品がありません（URLを確認してください）。' };
+
+  if (!confirmed) {
+    const hits = findRemovedWorks_(entries.map(e => e.url));
+    if (hits.length > 0) return removedConfirm_(hits, `選択した ${entries.length} 作品を登録`);
+  }
 
   const props = PropertiesService.getScriptProperties();
   if (isRunActive_(props)) {
@@ -195,10 +253,14 @@ function webKick() {
 // ==========================================
 // 一覧の管理・その他操作
 // ==========================================
-function webSeedResumeRecord(url, docIdsText) {
+function webSeedResumeRecord(url, docIdsText, confirmed) {
   const targetUrl = String(url || '').trim();
   if (!targetUrl) return { ok: false, message: '作品URLを入力してください。' };
   if (!extractWorkId(targetUrl)) return { ok: false, message: 'カクヨムの作品URLとして認識できません。' };
+  if (!confirmed) {
+    const hits = findRemovedWorks_([targetUrl]);
+    if (hits.length > 0) return removedConfirm_(hits, '一覧に追加');
+  }
 
   const docIds = String(docIdsText || '').split(',').map(s => s.trim()).filter(s => s);
   try {
@@ -212,8 +274,18 @@ function webClearResumeRecord(url) {
   if (!targetUrl) return { ok: false, message: '作品URLが指定されていません。' };
   try {
     clearResumeRecord(targetUrl);
-    return { ok: true, message: '一覧から削除しました（ドキュメント自体は残ります）。' };
+    return { ok: true, message: '一覧から削除しました（ドキュメント自体は残ります。削除済みリストに記録しました）。' };
   } catch(e) { return { ok: false, message: 'エラー: ' + e }; }
+}
+
+// 削除済みリストから外す（記録だけ。以後その作品を取得・登録しても確認が出なくなる）。
+function webForgetRemoved(workId) {
+  const id = String(workId || '').trim();
+  const rec = id ? getRemovedRecord(id) : null;
+  if (!rec) return { ok: false, message: '削除済みリストに見つかりません。' };
+  PropertiesService.getScriptProperties().deleteProperty(removedKey(id));
+  try { updateIndexSpreadsheet(); } catch(e) { Logger.log('索引シート更新エラー: ' + e); }
+  return { ok: true, message: `削除済みリストから外しました:「${rec.title || id}」` };
 }
 
 function webSyncFromSheet() {
