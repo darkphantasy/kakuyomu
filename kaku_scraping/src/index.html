@@ -274,6 +274,7 @@
       var knownUpdatedAt = {};    // workId -> 前回ポーリング時点の updatedAt
       var readingEp = {};         // workId -> 話数 or 'latest'（未読なし＝最新話まで読了）
       var pendingEpIds = {};      // workId -> true
+      var epSeq = {};             // workId -> 最後に出した次話問い合わせの通し番号（古い応答を捨てる用）
       var PROGRESS_CHUNK = 5;     // 1回の問い合わせで見る作品数（未キャッシュだと1件ずつ読むため）
 
       // 候補から選んで登録（閲覧履歴・未読あり一覧の貼り付けから）
@@ -464,18 +465,24 @@
         if (works.length === 0) return;
         var map = {};
         var ids = [];
+        var mySeq = {};
         works.forEach(function (w) {
           map[w.workId] = w.docIds;
           ids.push(w.workId);
           pendingEpIds[w.workId] = true;
+          mySeq[w.workId] = epSeq[w.workId] = (epSeq[w.workId] || 0) + 1;
         });
+        // 同じ作品への問い合わせが重なったとき、後から出した問い合わせの結果だけを使う。
+        //   ページ読込時の問い合わせ（追記前の状態を読んでいる）が、取得完了後の再問い合わせより
+        //   遅れて返ると、古い「最新」で新しい結果を上書きしてしまうため。
+        var latest = function (id) { return epSeq[id] === mySeq[id]; };
         google.script.run
           .withSuccessHandler(function (res) {
-            ids.forEach(function (id) { delete pendingEpIds[id]; });
+            ids.forEach(function (id) { if (latest(id)) delete pendingEpIds[id]; });
             // 判定できなかった作品はキーごと返ってこない（未取得のままにして次回また試す）
             if (res && res.progress) {
               ids.forEach(function (id) {
-                if (Object.prototype.hasOwnProperty.call(res.progress, id)) readingEp[id] = res.progress[id];
+                if (latest(id) && Object.prototype.hasOwnProperty.call(res.progress, id)) readingEp[id] = res.progress[id];
               });
             }
             // 判定の過程で開いたドキュメントのサイズも一緒に反映する（二重に開かない）
@@ -494,7 +501,7 @@
             renderTable();
           })
           .withFailureHandler(function () {
-            ids.forEach(function (id) { delete pendingEpIds[id]; }); // 次回また試す
+            ids.forEach(function (id) { if (latest(id)) delete pendingEpIds[id]; }); // 次回また試す
           })
           .webGetReadingProgress(map);
       }

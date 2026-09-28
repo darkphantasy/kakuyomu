@@ -14,7 +14,12 @@ const sandbox = {
     getFileById(id) {
       const f = drive[id];
       if (!f) throw new Error('not found');
-      return { isTrashed: () => !!f.trashed, getSize: () => Buffer.byteLength(f.text, 'utf8') };
+      return {
+        isTrashed: () => !!f.trashed,
+        // size を明示した場合はそれを返す（Google ドキュメントは書き込み直後もサイズが古いまま、の再現用）
+        getSize: () => (f.size != null ? f.size : Buffer.byteLength(f.text, 'utf8')),
+        getLastUpdated: () => new Date(f.updated != null ? f.updated : Date.now() - 3600 * 1000),
+      };
     },
   },
   UrlFetchApp: {
@@ -34,7 +39,7 @@ const sandbox = {
       return {
         get: k => (CacheService_store.has(k) ? CacheService_store.get(k) : null),
         put: (k, v) => CacheService_store.set(k, v),
-        getAll: () => ({}), removeAll: () => {},
+        getAll: () => ({}), removeAll: ks => ks.forEach(k => CacheService_store.delete(k)),
       };
     },
   },
@@ -42,7 +47,7 @@ const sandbox = {
 
 const src = fs.readFileSync('kaku_scraping/src/WebApp.js', 'utf8');
 vm.createContext(sandbox);
-vm.runInContext(src + '\nthis.webGetReadingProgress = webGetReadingProgress;', sandbox);
+vm.runInContext(src + '\nthis.webGetReadingProgress = webGetReadingProgress; this.invalidateProgressCache_ = invalidateProgressCache_;', sandbox);
 const webGetReadingProgress = sandbox.webGetReadingProgress;
 
 const body = n => 'あ'.repeat(n) + '\n';
@@ -82,6 +87,7 @@ const res3 = webGetReadingProgress({ w1: ['d1', 'd2'] });
 check('削除済み分冊は size:0、後続分冊のサイズも含まれる',
   res3, { progress: { w1: 120 }, sizes: { d1: 0, d2: Buffer.byteLength(doc([120, 121]), 'utf8') } });
 
+const defaultFetch = sandbox.UrlFetchApp.fetch;
 console.log('\n■ 判定不能でも、それまでに開いたドキュメントのサイズは返す');
 reset();
 drive = { d1: { text: doc([1]), trashed: true }, d2: { text: doc([5]), httpError: 500 } };
@@ -94,6 +100,36 @@ sandbox.UrlFetchApp.fetch = function (url) {
 const res4 = webGetReadingProgress({ w1: ['d1', 'd2'] });
 check('progress は返らないが、開けた範囲のサイズ（d1=削除済み, d2=取得失敗でもサイズ自体は既知）は返る',
   res4, { progress: {}, sizes: { d1: 0, d2: Buffer.byteLength(doc([5]), 'utf8') } });
+
+console.log('\n■ 追記後もドライブ上のサイズが古いままでも、古い「最新」を返さない');
+// Google ドキュメントは Docs API で書き込んだ直後、getSize() が古い値のまま残ることがある。
+// サイズだけをキャッシュの鍵にしていた頃は、追記前の「見出し無し（=最新）」が返り続けた。
+reset();
+sandbox.UrlFetchApp.fetch = defaultFetch;
+const T0 = Date.now() - 3 * 3600 * 1000;
+drive = { d1: { text: doc([]), size: 100, updated: T0 } };      // 全部読み終えて見出しが残っていない
+check('追記前は「最新」', webGetReadingProgress({ w1: ['d1'] }).progress, { w1: 'latest' });
+check('古い（更新から時間が経った）結果はキャッシュされる', exportCalls, 1);
+webGetReadingProgress({ w1: ['d1'] });
+check('同じ状態ならキャッシュを使い export しない', exportCalls, 1);
+drive.d1 = { text: doc([12, 13]), size: 100, updated: Date.now() - 1000 }; // 追記。サイズは据え置きのまま
+check('最終更新が変わればサイズが同じでも読み直して新しい話数を返す',
+  webGetReadingProgress({ w1: ['d1'] }).progress, { w1: 12 });
+check('読み直している', exportCalls, 2);
+
+console.log('\n■ 更新直後の判定結果はキャッシュしない（ドキュメント側の反映待ちで古い中身が返る窓を固定しない）');
+webGetReadingProgress({ w1: ['d1'] });
+check('更新直後の作品は毎回読み直す', exportCalls, 3);
+
+console.log('\n■ finishRun 用の invalidateProgressCache_ でキャッシュを明示的に消せる');
+reset();
+drive = { d1: { text: doc([]), size: 100, updated: T0 } };
+webGetReadingProgress({ w1: ['d1'] });
+check('キャッシュが入っている', CacheService_store.size, 1);
+sandbox.invalidateProgressCache_(['d1']);
+check('invalidateProgressCache_ で消える', CacheService_store.size, 0);
+webGetReadingProgress({ w1: ['d1'] });
+check('消した後は読み直す', exportCalls, 2);
 
 console.log(`\n合計: ${pass} 件成功 / ${fail} 件失敗\n`);
 process.exit(fail ? 1 : 0);

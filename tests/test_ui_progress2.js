@@ -81,6 +81,20 @@ setVar('pendingEpIds', {});
 call('maybeFetchSizes', [mkWork('w3', 'x', ['d3'])]); // w3 の進捗は既に確定済み・pending でもない
 check('進捗が pending でない作品は通常どおりサイズを問い合わせる', sizeCalls, [['d3']]);
 
+console.log('\n■ 同じ作品への次話問い合わせが重なったら、後から出した方の結果だけを使う');
+// ページ読込時の問い合わせ（追記前の状態＝「最新」）が、一括取得完了後の再問い合わせ
+// （新着あり＝12話）より遅れて返っても、古い「最新」で上書きしない。
+setVar('readingEp', {}); setVar('pendingEpIds', {}); setVar('docSizes', { d9: 1 });
+call('fetchProgressChunk', [mkWork('w9', 'x', ['d9'])]);
+const staleReq = handlers;
+call('fetchProgressChunk', [mkWork('w9', 'y', ['d9'])]);
+const freshReq = handlers;
+freshReq.ok({ progress: { w9: 12 }, sizes: {} });
+check('新しい問い合わせの結果が入る', state('readingEp').w9, 12);
+staleReq.ok({ progress: { w9: 'latest' }, sizes: {} });
+check('遅れて返った古い問い合わせの「最新」では上書きされない', state('readingEp').w9, 12);
+check('問い合わせ中フラグは新しい方の応答で外れている', 'w9' in state('pendingEpIds'), false);
+
 console.log('\n■ 取得操作を実行している間だけポーリングする');
 sizeCalls = []; progressCalls = [];
 sandbox.__lastTimeout = null;

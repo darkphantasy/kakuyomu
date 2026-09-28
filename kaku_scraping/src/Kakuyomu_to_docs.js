@@ -1435,9 +1435,10 @@ function finishRun(props, workId, docIds, startTime) {
       updatedAt:     Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm'),
     });
     Logger.log(`続き取得記録を更新: ${total} 話 / ${docIds.length} 冊`);
-    // Web UI のサイズ表示（webGetDocSizes）がこの作品ぶんだけ古い値を
-    // 返さないよう、書き込みが確定したこのタイミングでキャッシュを消す。
+    // Web UI のサイズ表示（webGetDocSizes）と次話表示（webGetReadingProgress）がこの作品ぶんだけ
+    // 古い値を返さないよう、書き込みが確定したこのタイミングでキャッシュを消す。
     try { invalidateDocSizeCache_(docIds); } catch(e) { Logger.log('サイズキャッシュ無効化に失敗: ' + e); }
+    try { invalidateProgressCache_(docIds); } catch(e) { Logger.log('次話キャッシュ無効化に失敗: ' + e); }
   }
 
   try { updateIndexSpreadsheet(); } catch(e) { Logger.log('索引シート更新エラー: ' + e); }

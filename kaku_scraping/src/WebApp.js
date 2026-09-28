@@ -25,6 +25,7 @@ const PROGRESS_SCAN_CHARS   = 20000;                    // ドキュメント先
 const PROGRESS_SCAN_BYTES   = PROGRESS_SCAN_CHARS * 3;  // UTF-8 の日本語は1字3バイト
 const PROGRESS_CACHE_SEC    = 21600;                    // CacheService の上限（6時間）
 const PROGRESS_CACHE_PREFIX = 'progress_';
+const PROGRESS_FRESH_MS     = 5 * 60 * 1000;            // 更新からこの時間内の判定結果はキャッシュしない
 const PROGRESS_LATEST       = 'latest';                 // 「未読なし・最新話まで読了」を表す返り値
 // 見出しは「<話タイトル> [NNN]」という1行。行末に寄せて本文中の [123] を拾わないようにする。
 const EPISODE_TAG_RE        = /^.*\[(\d{3,})\]\s*$/m;
@@ -352,38 +353,57 @@ function webGetReadingProgress(workDocIds) {
 //   { status: 'found', episode, size } / 'none'（見出し無し） / 'skip'（削除済み） / 'error'
 //   size は 'error' 以外なら必ず入る（'skip' は削除済み・アクセス不可の意味で 0）。
 //
-//   キャッシュキーにファイルサイズを含めているのがポイント。サイズが変わっていなければ
-//   中身も変わっていないので走査結果をそのまま使い回せる（＝読み進めてもいない、
-//   追記もされていないドキュメントは二度と読みに行かない）。逆にサイズが変われば
-//   キーごと変わるので、明示的なキャッシュ無効化は不要。
+//   キャッシュは docId ごとに1件で、値に「更新日時_サイズ」の印を持たせ、印が変わっていれば
+//   走査し直す（読み進めて先頭を削除すると更新日時が変わる）。サイズだけを印にしていた頃は、
+//   Google ドキュメントの Drive 上のサイズが書き込み直後に反映されないことがあり、全話読了時に
+//   覚えた「見出し無し」が追記後も返って「最新」と誤表示された。取得で書き込んだときは
+//   印に頼らず finishRun が invalidateProgressCache_ で明示的に消す。
+//   更新直後（PROGRESS_FRESH_MS 以内）の結果は、Drive 側の反映待ちの可能性があるので覚えない。
 function findFirstEpisodeNo_(cache, docId) {
-  let size;
+  let size, updatedMs;
   try {
     const f = DriveApp.getFileById(docId);
     if (f.isTrashed()) return { status: 'skip', size: 0 };
     size = f.getSize();
+    updatedMs = f.getLastUpdated().getTime();
   } catch(e) {
     return { status: 'skip', size: 0 }; // 削除済み・アクセス不可
   }
 
-  const key    = `${PROGRESS_CACHE_PREFIX}${docId}_${size}`;
-  const cached = cache.get(key);
-  if (cached != null) {
-    return (cached === '')
+  const key   = PROGRESS_CACHE_PREFIX + docId;
+  const stamp = `${updatedMs}_${size}`;
+  const cached = parseProgressCache_(cache.get(key));
+  if (cached && cached.stamp === stamp) {
+    return (cached.ep === '')
       ? { status: 'none', size: size }
-      : { status: 'found', episode: Number(cached), size: size };
+      : { status: 'found', episode: Number(cached.ep), size: size };
   }
 
   const head = fetchDocHeadText_(docId);
   if (head == null) return { status: 'error', size: size };
 
   const m = head.match(EPISODE_TAG_RE);
-  try { cache.put(key, m ? m[1] : '', PROGRESS_CACHE_SEC); }
-  catch(e) { Logger.log('次話のキャッシュ書き込み失敗: ' + e); }
+  if (Date.now() - updatedMs > PROGRESS_FRESH_MS) {
+    try { cache.put(key, JSON.stringify({ stamp: stamp, ep: m ? m[1] : '' }), PROGRESS_CACHE_SEC); }
+    catch(e) { Logger.log('次話のキャッシュ書き込み失敗: ' + e); }
+  }
 
   return m
     ? { status: 'found', episode: Number(m[1]), size: size }
     : { status: 'none', size: size };
+}
+
+function parseProgressCache_(raw) {
+  if (raw == null) return null;
+  try { return JSON.parse(raw); } catch(e) { return null; } // 旧形式（素の話数文字列）は読み直す
+}
+
+// 取得でドキュメントに書き込んだとき（finishRun）に呼ぶ。次話の判定結果を捨て、次の問い合わせで
+// 必ず本文先頭を読み直させる（Drive の更新日時・サイズの反映遅れに頼らないため）。
+function invalidateProgressCache_(docIds) {
+  docIds = Array.isArray(docIds) ? docIds : [];
+  if (docIds.length === 0) return;
+  CacheService.getScriptCache().removeAll(docIds.map(id => PROGRESS_CACHE_PREFIX + id));
 }
 
 // ドキュメント本文の「先頭だけ」をプレーンテキストで取る。

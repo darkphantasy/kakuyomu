@@ -91,7 +91,8 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 - 定義: ユーザーは読了分を先頭から削除する運用なので、**先頭に残っている最初の `[NNN]`** が今読んでいる(または次に読む)話。見出しが 1 つも残っていなければ `'latest'`(画面上「最新」= 未読なし)。
 - `webGetReadingProgress({workId: [docId,...]})` → `{progress: {workId: 話数|'latest'}, sizes: {docId: バイト数}}`。判定できなかった作品は `progress` にキーを入れない(クライアントは未取得扱いで次回再試行)。`sizes` は判定の過程で開いたドキュメントぶんだけ(見つかった時点で走査を打ち切るため、その後ろの分冊は含まれない)。
 - 判定は `fetchDocHeadText_` が Drive export エンドポイントを **HTTP Range 付き**で叩き、先頭 `PROGRESS_SCAN_CHARS`(2 万字)だけを `EPISODE_TAG_RE`(行末アンカー。本文中の `[123]` を拾わない)で探す。Range が無視され 200 が返っても先頭を切り出して使い、ログに残す。認証は既存の `writeFileContent` と同じ `ScriptApp.getOAuthToken()` + `UrlFetchApp`(追加スコープ不要)。
-- キャッシュキーに**ファイルサイズを含める**(`progress_<docId>_<size>`)。サイズが同じなら中身も同じなので、明示的な無効化は不要(TTL `PROGRESS_CACHE_SEC`=6 時間)。
+- キャッシュは docId ごとに 1 件(`progress_<docId>`、TTL `PROGRESS_CACHE_SEC`=6 時間)。値は `{stamp: '<最終更新ms>_<サイズ>', ep}` で、**印が一致したときだけ使い、違えば読み直す**(読み進めて先頭を削除すると最終更新が変わる)。**取得で書き込んだときは `finishRun` が `invalidateProgressCache_` で明示的に消す**。更新から `PROGRESS_FRESH_MS`(5 分)以内の判定結果はキャッシュしない(Drive 側の反映待ちで古い中身が返る窓を固定しないため)。
+- クライアントは作品ごとの問い合わせ通し番号 `epSeq` を持ち、**同じ作品への問い合わせが重なったら最後に出した方の応答だけを `readingEp` に反映する**(ページ読込時の「最新」が、一括取得後の再問い合わせより遅れて返って上書きするのを防ぐ)。
 - 分冊は古い順に見て、削除済み・見出し無しは飛ばして次へ。全て無ければ `'latest'`。
 - クライアントは `readingEp` を持ち、`PROGRESS_CHUNK`(5)件ずつ問い合わせる。
 - 既知の割り切り: ① 1 話が 2 万字超だと窓の外で「最新」と誤表示、② 読みかけの話は見出しごと消えているので表示は +1 側に寄る、③ 読書によるドキュメント削除は `updatedAt` を動かさないので、**読み進めた結果の反映はページ再読込時**。
@@ -138,6 +139,7 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 - OOM 経路(上記「実行環境と制約」)。Docs API で本文を読む案は形を変えても却下。
 - Web UI の完了検知に `running.active` の true→false エッジ検出を使わない。バックグラウンドタブでは遷移の瞬間を取りこぼして二度と検出できない。**`updatedAt` の差分検出**(`refreshChangedWorks`)が正。
 - `refreshChangedWorks` のサイズ取得を次話側の dedup に巻き込まない(上記)。
+- **次話キャッシュの印をファイルサイズだけにしない**。Google ドキュメントは Docs API で書き込んだ直後、Drive 上の `getSize()` が古い値のまま残ることがあり、全話読了時に覚えた「見出し無し」が追記後も返り続けて、新着を取得したのに「最新」と表示された(2026-09)。印は最終更新+サイズ、取得完了時は `finishRun` で明示的に無効化、更新直後はキャッシュしない。`test_progress2.js` / `test_ui_progress2.js` で検証している。
 - 待機中の常時ポーリングを復活させない。`visibilitychange` で無条件に `refresh()` しない。
 - **`batchStartNext` を呼ぶ前に `PHASE` を空のままにしない**。この関数は目次取得(ネットワーク・新着無しの作品は読み飛ばすので長い)を伴い、その間 `PHASE` が無いと `isRunActive_` が false → Web UI が「待機中」と判断してポーリングを永久に止める。`finishRun` のバッチ分岐は呼ぶ直前に、開始側(`startContinuationAll` / `webStartContinuationAll`)は `startBatch_` の中で `PHASE_BATCH_NEXT` を立てている(2026-09 の「取得状況が画面更新されない」不具合の原因)。
 - **`clearRunState` は `PHASE` を deleteProperty しない**(`RUN_STATE_KEYS` に含めない)。`clearRunState` の呼び出し側は直後にほぼ必ず新しい `PHASE` を `setProperties` で立て直すが、`PropertiesService` はキーごとに別々の API 呼び出しになるため、`PHASE` も一緒に消してしまうと削除〜再設定の間に `PHASE` が一瞬存在しない窓ができる。この窓に別の Web リクエスト(`webGetState` のポーリング)が重なると `isRunActive_` が false と誤判定され、Web UI が「待機中」と誤解してポーリングを永久に止める(一度止まると手動更新まで戻らないため、「順番待ちは残っているのに待機中のまま画面が固まる」不具合として表面化する。2026-09、選択登録の一括処理を長時間回した際に発見)。本当に `PHASE` ごと消したい箇所(`resetAll`。次に新しい `PHASE` を立てない唯一の経路)は呼び出し側で明示的に `deleteProperty('PHASE')` する。`test_active_gap.js` で `clearRunState` 後も `PHASE` が残ることを検証している。

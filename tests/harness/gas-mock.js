@@ -76,6 +76,7 @@ function createGasSandbox(opts = {}) {
       getId:      () => 'F:' + name,
       getName:    () => name,
       getSize:    () => (state.files[name] || '').length,
+      getLastUpdated: () => new Date(),
       getBlob:    () => ({ getDataAsString: () => state.files[name] }),
       setTrashed: () => { delete state.files[name]; },
       isTrashed:  () => !(name in state.files),
@@ -141,7 +142,8 @@ function createGasSandbox(opts = {}) {
         if (id === 'SCRIPT') return { getParents: () => ({ hasNext: () => true, next: () => folder }) };
         if (id === 'SS1') return { isTrashed: () => false, moveTo() {} };
         if (id.startsWith('F:')) return makeFile(id.slice(2));
-        if (state.docs[id]) return { isTrashed: () => false, moveTo() {}, getSize: () => state.docs[id].end };
+        if (state.docs[id]) return { isTrashed: () => false, moveTo() {}, getSize: () => state.docs[id].end,
+          getLastUpdated: () => new Date(state.docs[id].updatedMs || Date.now()) };
         throw new Error('not found ' + id);
       },
       getFolderById: () => folder,
