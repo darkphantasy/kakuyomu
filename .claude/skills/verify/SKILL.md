@@ -65,6 +65,7 @@ FAIL 行と「期待 / 実際」を読んで、**テストの期待値が古い�
 | 未読のみ表示は 'latest' だけ除外 | `test_unread_filter.js` |
 | 可読性リファクタ後の各部品の等価性 | `test_core_refactor.js` |
 | 抽出ブックマークレットの未読・全話数の正規表現は空白の有無を問わない | `test_seed_extract.js` |
+| なろうのブックマーク一覧からの抽出（全文タイトル・しおり・残りページの読み込み・タブは非同期より前に開く・void で包む・tools 版と同一）と、しおりを開始話数にする選択登録 | `test_seed_extract_narou.js`, `test_narou.js` |
 | 「一覧」「候補から選んで登録」タブの切り替え・自動更新で戻らない | `test_tabs.js` |
 | 小説家になろう対応（作品ID・目次のページ送り・前書き/後書きの区切り線・短編・URL の正規化・続き取得）。模擬 HTML は `registerNarouWork` | `test_narou.js` |
 | 削除済みリスト（削除で記録・再登録で自動解除・順番待ちに積む前に確認・確認後は続行・索引の削除済みタブ） | `test_removed_works.js`, `test_removed_ui.js` |

@@ -1,4 +1,4 @@
-// index.html: kakuyomuExtractCandidates_() の抽出ロジック。
+// index.html: extractSeedCandidates_() の抽出ロジック（カクヨム部分）。なろう部分は test_seed_extract_narou.js。
 //   ・未読・全話数の正規表現が空白文字（半角/全角スペース・&nbsp;）の有無に関わらずマッチすること
 //   ・結果の受け渡しが window.prompt() ではなく新しいタブの <textarea> で行われること
 //     （長い文字列だと prompt() は環境によって表示・コピーの途中で切れることがあり、
@@ -44,6 +44,7 @@ function runRaw(items, expr, openReturnsNull) {
   let openedWindow = null;
   const sandbox = {
     console,
+    location: { hostname: 'kakuyomu.jp', href: 'https://kakuyomu.jp/my/antenna/reading_histories' },
     document: {
       querySelectorAll: sel => (sel === '.widget-antennaList-item' ? items : []),
       getElementById: () => null, addEventListener() {},
@@ -65,7 +66,7 @@ function runRaw(items, expr, openReturnsNull) {
   };
   vm.createContext(sandbox);
   vm.runInContext(script, sandbox, { filename: 'index.html' });
-  const value = vm.runInContext(expr || 'kakuyomuExtractCandidates_()', sandbox);
+  const value = vm.runInContext(expr || 'extractSeedCandidates_()', sandbox);
   return { promptArgs, alerts, value, get window() { return openedWindow; } };
 }
 
@@ -124,7 +125,7 @@ section('この画面でリンクを押したときは動作確認として同�
 // クリックを握りつぶすと「押しても何も起きない」ため、代わりに関数をその場で呼んで結果を見せる。
 const r6 = runRaw([], 'runBookmarkletHere()');
 check('false を返す（javascript: への遷移はさせない）', r6.value, false);
-check('カクヨムのページではないので「0 件」の警告が出る', r6.alerts.length, 1);
+check('カクヨム・なろうのページではないので「0 件」の警告が出る', r6.alerts.length, 1);
 check('その警告に実行ページの案内が含まれる', r6.alerts[0].indexOf('閲覧履歴') >= 0, true);
 
 finish();

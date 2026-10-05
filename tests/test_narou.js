@@ -81,4 +81,14 @@ g('webClearResumeRecord("' + BASE + '")');
 const again = g('webStartFetch("https://ncode.syosetu.com/n1234ab/3/", "", "")');
 check('確認が出る', [again.needConfirm, again.message.indexOf('なろう作品') >= 0], [true, true]);
 
+section('選択登録（候補から選んで登録）: しおり − 1 話までを取得済みとして記録し、しおりの話から続き取得の対象にする');
+registerNarouWork(htmlByUrl, 'n5555ee', '選択登録の作品', 120);
+const sd = g('webSeedSelected([{ url: "https://ncode.syosetu.com/n5555ee/", readCount: 99 }])');
+check('開始する', [sd.ok, sd.kick], [true, true]);
+g('webKick()');
+const seeded = JSON.parse(props.RESUME_n5555ee);
+check('記録: 99 話まで取得済み・最後の話の ID・ドキュメントはまだ無い', [seeded.total, seeded.lastEpisodeId, seeded.docIds.length, seeded.url], [99, '99', 0, 'https://ncode.syosetu.com/n5555ee/']);
+const sc = g('webStartContinuation("https://ncode.syosetu.com/n5555ee/")');
+check('続き取得は しおりの 100 話から', [sc.ok, props.CONT_FROM, props.CONT_TO], [true, '100', '120']);
+
 finish();

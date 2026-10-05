@@ -184,13 +184,15 @@
         <h2>候補から選んで登録</h2>
         <p style="font-size:12px;color:var(--muted);margin:0 0 8px">
           下のリンクをブラウザの<b>ブックマークバーへドラッグ</b>してください。カクヨムの
-          「<a href="https://kakuyomu.jp/my/antenna/reading_histories" target="_blank">閲覧履歴</a>」または
-          「<a href="https://kakuyomu.jp/my/antenna/works?serial_status=all" target="_blank">未読あり</a>」を開いた状態でそのブックマークをクリックすると、
+          「<a href="https://kakuyomu.jp/my/antenna/reading_histories" target="_blank">閲覧履歴</a>」・
+          「<a href="https://kakuyomu.jp/my/antenna/works?serial_status=all" target="_blank">未読あり</a>」、または小説家になろうの
+          「<a href="https://syosetu.com/favnovelmain/list/" target="_blank">ブックマーク</a>」を開いた状態でそのブックマークをクリックすると、
           新しいタブが開き、作品一覧（URL・タイトル・未読話数・全話数）の JSON が全選択された状態で表示されます。コピー（Ctrl+C / Cmd+C）して、下の欄に貼り付けてください。
+          なろうはブックマークの<b>残りのページも自動で読み込み</b>（1 秒間隔）、しおりを挟んだ話を開始話数の初期値にします。
         </p>
         <p>
-          <a id="seedBookmarklet" class="bookmarklet" href="#" title="ここをブックマークバーへドラッグ（クリックすると動作確認だけできます）" onclick="return runBookmarkletHere()">📥 カクヨム作品一覧を抽出</a>
-          <span style="font-size:12px;color:var(--muted);margin-left:8px">（この画面でクリックすると動作確認。カクヨムのページではないので「0 件」と出れば正常）</span>
+          <a id="seedBookmarklet" class="bookmarklet" href="#" title="ここをブックマークバーへドラッグ（クリックすると動作確認だけできます）" onclick="return runBookmarkletHere()">📥 作品一覧を抽出（カクヨム / なろう）</a>
+          <span style="font-size:12px;color:var(--muted);margin-left:8px">（この画面でクリックすると動作確認。カクヨム・なろうのページではないので「0 件」と出れば正常）</span>
         </p>
         <details>
           <summary>ドラッグがうまくいかない場合（手動でブックマークを作る / コンソールに貼り付ける）</summary>
@@ -205,7 +207,7 @@
           </div>
           <p style="font-size:12px;color:var(--muted);margin-top:10px">
             <b>コンソールに貼り付ける:</b> 同じ処理を <code>kaku_scraping/tools/extract_antenna_list.js</code> としてリポジトリにも置いています。
-            カクヨムのページを開いた状態でブラウザの開発者ツール（F12）のコンソールにその中身を貼り付けて実行しても、同じ結果が得られます。
+            カクヨム・なろうの対象ページを開いた状態でブラウザの開発者ツール（F12）のコンソールにその中身を貼り付けて実行しても、同じ結果が得られます。
           </p>
         </details>
         <textarea id="seedPaste" rows="3" style="width:100%;font-family:monospace;font-size:12px;padding:8px;border:1px solid var(--line);border-radius:6px" placeholder='[{"url":"https://kakuyomu.jp/works/...","title":"...","unread":8,"total":305}, ...]'></textarea>
@@ -311,17 +313,154 @@
       //   workId -> { url, title, unread, total, checked }。複数回貼り付けても workId で重複しない。
       var seedCandidates = {};
 
-      // カクヨムの閲覧履歴・未読あり一覧のページで実行する抽出ロジック。
-      //   この画面（カクヨム取得コンソール）では呼ばない。document 構造が違うので何も見つからず、
-      //   空の一覧が出るだけ（実害はない）。関数の中身は Function.prototype.toString() で取り出して
+      // カクヨムの閲覧履歴・未読あり一覧、または小説家になろうのブックマーク一覧のページで
+      //   実行する抽出ロジック（開いているページのドメインで振り分ける）。
+      //   この画面（取得コンソール）では呼ばない。document 構造が違うので何も見つからず、
+      //   「0 件」の警告が出るだけ（実害はない）。関数の中身は Function.prototype.toString() で取り出して
       //   ブックマークレット（javascript: リンク）を組み立てるためだけに使う（下の buildSeedBookmarklet_）。
+      //   そのため外側の変数・関数は使わない（中で完結させる）。
       //   同じ処理を kaku_scraping/tools/extract_antenna_list.js にも置いている
       //   （コンソールに直接貼り付けたい場合用）。ロジックを変えたら両方直すこと。
-      function kakuyomuExtractCandidates_() {
-        // try/catch で包む理由: ここで例外が起きるとブックマークレットは「クリックしても
-        // 何も起きない」ように見える（javascript: URI 実行時のエラーは画面に出ない）。
-        // 何が起きたか必ず alert で可視化する。
+      //   なろうはブックマーク一覧の残りのページも読み込むため非同期になり、Promise を返す
+      //   （ブックマークレット側は void で包んで、戻り値がページの内容に置き換わらないようにしている）。
+      function extractSeedCandidates_() {
+        // 結果の受け渡し（両サイト共通）。window.prompt() は使わない。長い文字列だと環境によって
+        // 表示・コピーの途中で切れることがあり、貼り付け先で JSON.parse に失敗する（原因が
+        // 分かりにくい）。新しいタブに <textarea> を出して全選択した状態で渡す。
+        //   w が null（ポップアップがブロックされた）のときだけ window.prompt にフォールバックする。
+        function showResult(items, w, siteLabel, note) {
+          var json = JSON.stringify(items);
+          if (!w) {
+            window.prompt(
+              items.length + ' 件見つかりました（ポップアップがブロックされたため代替表示）。' +
+              '全選択（Ctrl+A / Cmd+A）してコピーしてください。' + (note || ''),
+              json
+            );
+            return;
+          }
+          w.document.title = siteLabel + '抽出結果';
+          var p = w.document.createElement('p');
+          p.textContent = items.length + ' 件見つかりました。下のテキストは全選択済みです。' +
+            'コピー（Ctrl+C / Cmd+C）して、取得コンソールの「候補から選んで登録」欄に貼り付けてください。' + (note || '');
+          var ta = w.document.createElement('textarea');
+          ta.value = json;
+          ta.readOnly = true;
+          ta.style.width = '100%';
+          ta.style.height = '80vh';
+          ta.style.boxSizing = 'border-box';
+          ta.style.fontFamily = 'monospace';
+          w.document.body.appendChild(p);
+          w.document.body.appendChild(ta);
+          ta.focus();
+          ta.select();
+        }
+
+        // ---- 小説家になろう：ブックマーク一覧（https://syosetu.com/favnovelmain/list/ など） ----
+        //   いま開いているページだけでなく、ページ送りされた残りのページも順に読み込む
+        //   （ブックマークは 1 ページ 30〜50 件で、全件だと 10 ページ前後になるため）。
+        //   読み込みはブラウザのログイン状態のまま同じサイトへ 1 秒間隔で行う。
+        //   HTML は文字列のまま正規表現で読む（いま開いているページも、読み込んだ残りのページも
+        //   同じ関数で処理できるようにするため）。
+        function decodeEntities(s) {
+          return String(s || '')
+            .replace(/&nbsp;/g, ' ')
+            .replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+            .replace(/&#x([0-9a-f]+);/gi, function (_, h) { return String.fromCharCode(parseInt(h, 16)); })
+            .replace(/&#(\d+);/g, function (_, d) { return String.fromCharCode(Number(d)); })
+            .replace(/&amp;/g, '&');
+        }
+        function narouItems(html) {
+          var items = [];
+          var parts = String(html).split(/<li[^>]*class="[^"]*\bp-up-bookmark-item\b[^"]*"[^>]*>/).slice(1);
+          parts.forEach(function (it) {
+            var tm = it.match(/class="[^"]*\bp-up-bookmark-item__title\b[^"]*"[^>]*>\s*<a[^>]+href="https?:\/\/ncode\.syosetu\.com\/(n\d+[a-z]+)\/?"[^>]*>([\s\S]*?)<\/a>/i);
+            if (!tm) return;
+            var ncode = tm[1].toLowerCase();
+            var dt = it.match(/data-title="([^"]*)"/); // 一覧の表示は途中で「…」に切られるので、こちらが全文
+            var title = dt ? decodeEntities(dt[1])
+              : decodeEntities(tm[2].replace(/<span[^>]*>[\s\S]*?<\/span>/g, '').replace(/<[^>]+>/g, '')).trim();
+            var mt = it.match(/全\s*([\d,]+)\s*エピソード/);
+            var total = mt ? Number(mt[1].replace(/,/g, '')) : (/c-up-label--novel-short/.test(it) ? 1 : null);
+            var ms = it.match(/p-icon--siori[^>]*>\s*<\/span>\s*ep\.\s*(\d+)/);
+            var mu = it.match(/p-up-bookmark-item__unread-num[^>]*>\s*(\d+)/);
+            var unread = mu ? Number(mu[1]) : (/未読はありません/.test(it) ? 0 : null);
+            items.push({
+              url:    'https://ncode.syosetu.com/' + ncode + '/',
+              title:  title.replace(/\s+/g, ' ').trim(),
+              unread: unread,
+              total:  total,
+              siori:  ms ? Number(ms[1]) : null, // しおりを挟んだ話。登録時の開始話数の初期値になる
+            });
+          });
+          return items;
+        }
+        function narouPageInfo(html) {
+          var cur = String(html).match(/c-up-pager__item is-current[^>]*>\s*(\d+)/);
+          var lastTag = String(html).match(/<a\s[^>]*title="最後のページ"[^>]*>/);
+          var lastHref = lastTag && lastTag[0].match(/href="([^"]+)"/);
+          var href = lastHref ? decodeEntities(lastHref[1]) : null;
+          var lastP = href && href.match(/[?&]p=(\d+)/);
+          return { current: cur ? Number(cur[1]) : 1, last: lastP ? Number(lastP[1]) : 1, lastHref: href };
+        }
+
         try {
+          if (/(^|\.)syosetu\.com$/.test(location.hostname || '')) {
+            var html0 = document.documentElement.outerHTML;
+            var all = narouItems(html0);
+            if (all.length === 0) {
+              alert('作品が見つかりませんでした。小説家になろうのブックマーク一覧（https://syosetu.com/favnovelmain/list/）で実行してください。');
+              return;
+            }
+            var seen = {};
+            all.forEach(function (x) { seen[x.url] = true; });
+            var info = narouPageInfo(html0);
+            var pages = [];
+            for (var pg = 1; pg <= info.last; pg++) if (pg !== info.current) pages.push(pg);
+
+            // 新しいタブはクリックの直後（＝この同期処理の中）で開く。残りのページを読み込んだ後
+            // （非同期の後）に開こうとすると、ポップアップとしてブロックされるため。
+            var w = window.open('', '_blank');
+            var msg = null;
+            if (w) {
+              w.document.title = 'なろう抽出中…';
+              msg = w.document.createElement('p');
+              msg.textContent = 'ブックマークを読み込んでいます… 1 / ' + (pages.length + 1) + ' ページ';
+              w.document.body.appendChild(msg);
+            }
+            var failed = [];
+            var chain = Promise.resolve();
+            pages.forEach(function (p, k) {
+              chain = chain
+                .then(function () { return new Promise(function (r) { setTimeout(r, 1000); }); })
+                .then(function () {
+                  var u = new URL(info.lastHref, location.href);
+                  u.searchParams.set('p', String(p));
+                  return fetch(u.toString(), { credentials: 'same-origin' });
+                })
+                .then(function (res) {
+                  if (!res.ok) throw new Error('HTTP ' + res.status);
+                  return res.text();
+                })
+                .then(function (h) {
+                  narouItems(h).forEach(function (x) { if (!seen[x.url]) { seen[x.url] = true; all.push(x); } });
+                })
+                .catch(function () { failed.push(p); })
+                .then(function () {
+                  if (msg) msg.textContent = 'ブックマークを読み込んでいます… ' + (k + 2) + ' / ' + (pages.length + 1) + ' ページ';
+                });
+            });
+            return chain.then(function () {
+              if (msg) msg.textContent = '';
+              var note = failed.length
+                ? '（' + failed.join('・') + ' ページ目は読み込めませんでした。必要ならそのページを開いて実行し直してください）'
+                : '';
+              showResult(all, w, 'なろう', note);
+            }).catch(function (e) {
+              alert('抽出に失敗しました。この内容を報告してください:\n' + (e && e.message ? e.message : e));
+            });
+          }
+
+          // ---- カクヨム：閲覧履歴・未読あり一覧 ----
           var items = [];
           document.querySelectorAll('.widget-antennaList-item').forEach(function (li) {
             var link = li.querySelector('.widget-antennaList-workInfo');
@@ -349,55 +488,32 @@
           });
 
           if (items.length === 0) {
-            alert('作品が見つかりませんでした。カクヨムの閲覧履歴・未読あり一覧のページで実行してください。');
+            alert('作品が見つかりませんでした。カクヨムの閲覧履歴・未読あり一覧、または小説家になろうのブックマーク一覧のページで実行してください。');
             return;
           }
-
-          // window.prompt() は使わない。長い文字列だと環境によって表示・コピーの
-          // 途中で切れることがあり、貼り付け先で JSON.parse に失敗する（原因が
-          // 分かりにくい）。新しいタブに <textarea> を出して全選択した状態で渡す。
-          var json = JSON.stringify(items);
-          var w = window.open('', '_blank');
-          if (!w) {
-            window.prompt(
-              items.length + ' 件見つかりました（ポップアップがブロックされたため代替表示）。' +
-              '全選択（Ctrl+A / Cmd+A）してコピーしてください。',
-              json
-            );
-            return;
-          }
-          w.document.title = 'カクヨム抽出結果';
-          var p = w.document.createElement('p');
-          p.textContent = items.length + ' 件見つかりました。下のテキストは全選択済みです。' +
-            'コピー（Ctrl+C / Cmd+C）して、カクヨム取得コンソールの「候補から選んで登録」欄に貼り付けてください。';
-          var ta = w.document.createElement('textarea');
-          ta.value = json;
-          ta.readOnly = true;
-          ta.style.width = '100%';
-          ta.style.height = '80vh';
-          ta.style.boxSizing = 'border-box';
-          ta.style.fontFamily = 'monospace';
-          w.document.body.appendChild(p);
-          w.document.body.appendChild(ta);
-          ta.focus();
-          ta.select();
+          showResult(items, window.open('', '_blank'), 'カクヨム');
         } catch (e) {
+          // try/catch で包む理由: ここで例外が起きるとブックマークレットは「クリックしても
+          // 何も起きない」ように見える（javascript: URI 実行時のエラーは画面に出ない）。
+          // 何が起きたか必ず alert で可視化する。
           alert('抽出に失敗しました。この内容を報告してください:\n' + (e && e.message ? e.message : e));
         }
       }
 
-      // 上の関数のソースそのものを javascript: リンクにする（ブックマークバーへドラッグして使う）
+      // 上の関数のソースそのものを javascript: リンクにする（ブックマークバーへドラッグして使う）。
+      //   void で包むのは、javascript: URL の評価結果（なろうでは Promise）が undefined 以外だと、
+      //   ブラウザがその文字列でページを置き換えてしまうため。
       function buildSeedBookmarklet_() {
-        return 'javascript:' + encodeURIComponent('(' + kakuyomuExtractCandidates_.toString() + ')();');
+        return 'javascript:' + encodeURIComponent('void (' + extractSeedCandidates_.toString() + ')();');
       }
 
       // この画面でリンクを押したときの動作確認。
       //   javascript: への遷移はさせない（GAS の Web アプリは iframe の中で動くため、
       //   リンクを踏んでも javascript: は実行されず「押しても何も起きない」ように見える）。
-      //   代わりに同じ関数をその場で呼ぶ。カクヨムのページではないので通常は「0 件」の
+      //   代わりに同じ関数をその場で呼ぶ。カクヨム・なろうのページではないので通常は「0 件」の
       //   警告が出るが、それが出れば「リンクに仕込んだコードは生きている」と分かる。
       function runBookmarkletHere() {
-        kakuyomuExtractCandidates_();
+        extractSeedCandidates_();
         return false;
       }
 
@@ -822,10 +938,21 @@
         });
       }
 
-      // URL から作品ID（数字部分）を取り出す。クライアント側での重複排除・照合用。
+      // URL から作品ID を取り出す。クライアント側での重複排除・照合用。
+      //   サーバー側の extractWorkId と同じ規則（カクヨムは数字、なろうは Nコードを小文字に揃える）。
       function extractWorkIdFromUrl_(u) {
-        var m = String(u || '').match(/\/works\/(\d+)/);
-        return m ? m[1] : null;
+        var s = String(u || '');
+        var k = s.match(/kakuyomu\.jp\/works\/(\d+)/);
+        if (k) return k[1];
+        var n = s.match(/ncode\.syosetu\.com\/(n\d+[a-z]+)(?=[\/?#]|$)/i);
+        return n ? n[1].toLowerCase() : null;
+      }
+
+      // 作品ID から作品ページの URL（候補をサーバーへ渡すときの形）
+      function seedWorkUrl_(workId) {
+        return /^n\d+[a-z]+$/.test(workId)
+          ? 'https://ncode.syosetu.com/' + workId + '/'
+          : 'https://kakuyomu.jp/works/' + workId;
       }
 
       // 貼り付けた JSON（閲覧履歴・未読あり一覧の抽出結果）を候補に取り込む。
@@ -848,10 +975,11 @@
           var workId = extractWorkIdFromUrl_(it && it.url);
           if (!workId) return;
           next[workId] = {
-            url:     'https://kakuyomu.jp/works/' + workId,
+            url:     seedWorkUrl_(workId),
             title:   (it.title != null ? String(it.title) : workId),
             unread:  (it.unread != null ? Number(it.unread) : null),
             total:   (it.total  != null ? Number(it.total)  : null),
+            siori:   (it.siori  != null ? Number(it.siori)  : null), // なろう: しおりを挟んだ話
             checked: false,
             startEpisode: null,
           };
@@ -896,9 +1024,11 @@
         renderSeedList();
       }
 
-      // 開始話数の自動計算値（未読・全話数の両方が分かっているときだけ）。
-      //   「そこから取得を始める話数」＝ 全話数－未読話数＋1。
+      // 開始話数の自動計算値。
+      //   なろう: しおりを挟んだ話（読みかけの話を含めて取り直す）。しおりが無ければ空欄。
+      //   カクヨム: 未読・全話数の両方が分かっているときだけ「全話数－未読話数＋1」（最初の未読話）。
       function seedAutoStartEpisode_(c) {
+        if (c.siori != null) return Math.max(1, c.siori);
         return (c.total != null && c.unread != null) ? Math.max(1, c.total - c.unread + 1) : null;
       }
 
