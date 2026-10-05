@@ -17,6 +17,8 @@
 // ==========================================
 
 const WEB_KICKOFF_DELAY_MS = 1000;   // Web UI から起動する際のトリガー遅延
+const URL_NOT_RECOGNIZED_MESSAGE =
+  '作品URLとして認識できません（カクヨム https://kakuyomu.jp/works/... または 小説家になろう https://ncode.syosetu.com/n.../ の形式。R18 作品は対象外です）。';
 const DOC_SIZE_CACHE_SEC   = 3600;   // ドキュメントサイズのキャッシュ保持時間（1時間）
 const DOC_SIZE_CACHE_PREFIX = 'docsize_';
 
@@ -50,6 +52,7 @@ function webGetState() {
         workId:     workId,
         title:      title,
         shortTitle: shortenTitleForFileName_(title),
+        site:       isNarouWorkId_(workId) ? 'narou' : 'kakuyomu', // 一覧のサイト表示用
         url:        rec.url || '',
         total:      (rec.total != null ? String(rec.total) : ''),
         updatedAt:  rec.updatedAt || '',
@@ -130,7 +133,7 @@ function webStartWork_(mode, url, startEpisode, endEpisode, confirmed) {
   const targetUrl = String(url || '').trim();
   if (!targetUrl) return { ok: false, message: '作品URLを入力してください。' };
   if (!extractWorkId(targetUrl)) {
-    return { ok: false, message: 'カクヨムの作品URLとして認識できません（https://kakuyomu.jp/works/... の形式）。' };
+    return { ok: false, message: URL_NOT_RECOGNIZED_MESSAGE };
   }
 
   if (mode === 'fetch' && !confirmed) {
@@ -256,7 +259,7 @@ function webKick() {
 function webSeedResumeRecord(url, docIdsText, confirmed) {
   const targetUrl = String(url || '').trim();
   if (!targetUrl) return { ok: false, message: '作品URLを入力してください。' };
-  if (!extractWorkId(targetUrl)) return { ok: false, message: 'カクヨムの作品URLとして認識できません。' };
+  if (!extractWorkId(targetUrl)) return { ok: false, message: URL_NOT_RECOGNIZED_MESSAGE };
   if (!confirmed) {
     const hits = findRemovedWorks_([targetUrl]);
     if (hits.length > 0) return removedConfirm_(hits, '一覧に追加');

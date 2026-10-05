@@ -16,6 +16,7 @@
 //   createdDocs  … Docs.Documents.create の呼び出し回数（docId は 'DOC<n>'）
 //   triggers     … 登録中のトリガー（ハンドラ関数名の配列）
 //   batchUpdates … Docs.batchUpdate の記録 [{id, n}]
+//   insertedTexts … Docs.batchUpdate の insertText で挿入した文字列（挿入順）
 //   sheetOps     … 索引シートへの操作名の記録
 //   sheetRows    … 索引スプレッドシートのタブ名 → 最後に setValues した2次元配列
 //   htmlByUrl    … UrlFetchApp が返す HTML（url → html。無ければ 404）
@@ -24,7 +25,7 @@
 //
 // opts:
 //   htmlByUrl … 初期の URL → HTML 表
-//   files     … 読み込むソース（既定 ['Kakuyomu_to_docs.js', 'WebApp.js']）
+//   files     … 読み込むソース（既定 ['Kakuyomu_to_docs.js', 'Narou.js', 'WebApp.js']）
 //   fetch     … (url, opt) => response | undefined。UrlFetchApp.fetch の前段フック
 //               （Drive export の Range 応答など、テスト固有の応答を差し込む）
 //   now       … Utilities.formatDate が返す固定文字列（既定 '2026-09-11 12:00'）
@@ -58,10 +59,48 @@ function registerWork(htmlByUrl, workId, title, n) {
   return htmlByUrl;
 }
 
+// ---- 小説家になろう（ncode.syosetu.com）を模した HTML。実物（2026-10）と同じクラス名・URL 形だけを持つ ----
+// 目次の1ページ（1ページ 100 話。page は 1 始まり、n は全話数）
+function narouTocPage(ncode, title, n, page) {
+  const perPage = 100;
+  const last = Math.max(1, Math.ceil(n / perPage));
+  let items = '';
+  for (let i = (page - 1) * perPage + 1; i <= Math.min(n, page * perPage); i++) {
+    items += `<div class="p-eplist__sublist">\n<a href="/${ncode}/${i}/" class="p-eplist__subtitle">\n第${i}話 &amp; 話\n</a>\n<div class="p-eplist__update">2026/01/01</div>\n</div>\n`;
+  }
+  const pager = (last > 1)
+    ? `<div class="c-pager"><div class="c-pager__pager">` +
+      (page < last ? `<a href="/${ncode}/?p=${page + 1}" class="c-pager__item c-pager__item--next">次へ</a>` : '') +
+      `<a href="/${ncode}/?p=${last}" class="c-pager__item c-pager__item--last">最後へ</a></div></div>`
+    : '';
+  return `<html><head><meta property="og:title" content="${title}"></head><body>` +
+    `<h1 class="p-novel__title">${title}</h1>${pager}<div class="p-eplist">${items}</div>${pager}</body></html>`;
+}
+
+// 1話ぶんの本文ページ（opts.preface / opts.afterword で前書き・後書きを付ける）
+function narouEpisodePage(i, opts = {}) {
+  const div = (mod, inner) => `<div class="js-novel-text p-novel__text${mod ? ' p-novel__text--' + mod : ''}">\n${inner}\n</div>\n`;
+  return `<html><body><h1 class="p-novel__title p-novel__title--rensai">第${i}話</h1><div class="p-novel__body">\n` +
+    (opts.preface ? div('preface', `<p id="Lp1">前書き${i}</p>\n<p id="Lp2"><br /></p>`) : '') +
+    div('', `<p id="L1"><br /></p>\n<p id="L2">　本文${i}の<ruby>漢字<rp>（</rp><rt>かんじ</rt><rp>）</rp></ruby>。</p>\n<p id="L3">「会話${i}」</p>`) +
+    (opts.afterword ? div('afterword', `<p id="La1">後書き${i}</p>`) : '') +
+    `</div></body></html>`;
+}
+
+// ncode の作品（n 話）の目次全ページと各話 URL を htmlByUrl に登録する
+function registerNarouWork(htmlByUrl, ncode, title, n, epOpts) {
+  const base = `https://ncode.syosetu.com/${ncode}/`;
+  const last = Math.max(1, Math.ceil(n / 100));
+  htmlByUrl[base] = narouTocPage(ncode, title, n, 1);
+  for (let p = 2; p <= last; p++) htmlByUrl[`${base}?p=${p}`] = narouTocPage(ncode, title, n, p);
+  for (let i = 1; i <= n; i++) htmlByUrl[`${base}${i}/`] = narouEpisodePage(i, epOpts);
+  return htmlByUrl;
+}
+
 function createGasSandbox(opts = {}) {
   const state = {
     props: {}, files: {}, docs: {}, createdDocs: 0, triggers: [],
-    batchUpdates: [], sheetOps: [], sheetRows: {}, htmlByUrl: opts.htmlByUrl || {}, cache: {}, logs: [],
+    batchUpdates: [], insertedTexts: [], sheetOps: [], sheetRows: {}, htmlByUrl: opts.htmlByUrl || {}, cache: {}, logs: [],
   };
 
   const propsApi = {
@@ -172,7 +211,7 @@ function createGasSandbox(opts = {}) {
         get: id => ({ body: { content: [{ endIndex: state.docs[id].end }] } }),
         batchUpdate: (req, id) => {
           state.batchUpdates.push({ id, n: req.requests.length });
-          req.requests.forEach(r => { if (r.insertText) state.docs[id].end += r.insertText.text.length; });
+          req.requests.forEach(r => { if (r.insertText) { state.docs[id].end += r.insertText.text.length; state.insertedTexts.push(r.insertText.text); } });
         },
         create: () => {
           state.createdDocs++;
@@ -197,7 +236,7 @@ function createGasSandbox(opts = {}) {
   };
   vm.createContext(sandbox);
 
-  (opts.files || ['Kakuyomu_to_docs.js', 'WebApp.js']).forEach(name => {
+  (opts.files || ['Kakuyomu_to_docs.js', 'Narou.js', 'WebApp.js']).forEach(name => {
     vm.runInContext(fs.readFileSync(path.join(SRC_DIR, name), 'utf8'), sandbox, { filename: name });
   });
 
@@ -205,4 +244,4 @@ function createGasSandbox(opts = {}) {
   return { sandbox, state, g };
 }
 
-module.exports = { createGasSandbox, workPage, episodePage, registerWork, SRC_DIR };
+module.exports = { createGasSandbox, workPage, episodePage, registerWork, narouTocPage, narouEpisodePage, registerNarouWork, SRC_DIR };

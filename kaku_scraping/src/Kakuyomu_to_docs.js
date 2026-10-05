@@ -34,6 +34,7 @@ const TIMEOUT_THRESHOLD_MS = 5 * 60 * 1000;    // タイムアウト判定（6�
 const RETRIGGER_DELAY_MS   = 30 * 1000;        // 再トリガー間隔（GASの都合で実際は最大1分前後の揺れあり）
 const FETCH_SLEEP_MS       = 500;              // 取得バッチごとの待機（相手サーバーへの礼儀）
 const FETCH_PARALLEL       = 3;                // 同時取得数（fetchAll。礼儀の範囲で控えめに）
+const TOC_PAGE_SLEEP_MS    = 800;              // 目次のページ送りごとの待機（カクヨム・なろう共通）
 const START_EPISODE        = 1;                // 取得開始話数（1始まり）
 const END_EPISODE          = 0;                // 取得終了話数（1始まり・この話まで。0=無制限。デバッグ用）
 const FONT_FAMILY            = 'BIZ UDGothic'; // 本文フォント（等幅・全角スペースを全角幅で描画）
@@ -345,7 +346,7 @@ function startFetch(url, startEpisode, endEpisode) {
 // 初回取得の準備。run 状態をセットしたら true、失敗なら false。
 //   ※ 実際の取得開始（continuesFetch / トリガー）は呼び出し側が行う。
 function prepareFetch(url, startEpisode, endEpisode) {
-  const targetUrl = url || KAKUYOMU_URL;
+  const targetUrl = canonicalWorkUrl_(url || KAKUYOMU_URL);
   const startEp   = (startEpisode === undefined || startEpisode === null || startEpisode === '') ? START_EPISODE : Number(startEpisode);
   const endEp     = (endEpisode   === undefined || endEpisode   === null || endEpisode   === '') ? END_EPISODE   : Number(endEpisode);
 
@@ -521,6 +522,7 @@ function markBatchStarted_(props) {
 function prepareContinuation(url) {
   const workId = extractWorkId(url);
   if (!workId) { Logger.log('作品IDの取得失敗: ' + url); return false; }
+  url = canonicalWorkUrl_(url);
 
   const rec = getResumeRecord(workId);
   if (!rec) {
@@ -603,7 +605,7 @@ function seedResumeRecord(url, existingDocIds) {
 //   （閲覧履歴・未読あり一覧から選んで登録するとき、既読分をスキップするために使う）。
 //   索引シートの更新はしない（呼び出し側でまとめて1回行う）。
 function seedResumeRecordAt_(url, existingDocIds, readCount) {
-  const targetUrl = url || KAKUYOMU_URL;
+  const targetUrl = canonicalWorkUrl_(url || KAKUYOMU_URL);
   const docIds = existingDocIds || [];
 
   const workId = extractWorkId(targetUrl);
@@ -1147,7 +1149,7 @@ function runFetchPhase(props, startTime) {
 
         let epText = '（本文取得失敗）';
         if (epHtml) {
-          epText = extractEpisodeText_(epHtml);
+          epText = extractEpisodeText_(epHtml, workId);
         } else {
           Logger.log(`スキップ: ${ep.url}`);
         }
@@ -1663,6 +1665,8 @@ function writeBuffer(token, fileName, content) {
 //   HTML が取れなければ null（呼び出し側でログを出す）。episodes が空でもそのまま返す。
 //   nextData は診断用（呼び出し側が __NEXT_DATA__ をダンプしたい場合に使う）。
 function loadWorkCatalog_(url, workId) {
+  if (isNarouWorkId_(workId)) return loadNarouCatalog_(workId); // 小説家になろう（Narou.js）
+
   const topHtml = fetchHtml(url);
   if (!topHtml) return null;
   const nextData = extractNextData(topHtml);
@@ -1709,7 +1713,7 @@ function fetchPaginatedEpisodes(workId, baseEpisodes) {
     Logger.log(`ページ ${page}: ${added} 件追加`);
     if (added === 0) break;
     page++;
-    Utilities.sleep(800);
+    Utilities.sleep(TOC_PAGE_SLEEP_MS);
   }
 
   return allEpisodes;
@@ -1749,7 +1753,7 @@ function fetchEpisodesFromToc(workId) {
     if (found === 0) break;
     if (!html.includes(`page=${page + 1}`)) break;
     page++;
-    Utilities.sleep(800);
+    Utilities.sleep(TOC_PAGE_SLEEP_MS);
   }
 
   return episodes;
@@ -1818,7 +1822,9 @@ function extractEpisodesFromNextData(nextData, workId) {
 }
 
 // 1話ぶんの HTML から本文テキストを取り出す（__NEXT_DATA__ 優先、無ければ HTML を直接見る）
-function extractEpisodeText_(epHtml) {
+//   workId がなろうの Nコードなら Narou.js の抽出に回す。
+function extractEpisodeText_(epHtml, workId) {
+  if (isNarouWorkId_(workId)) return extractNarouEpisodeText_(epHtml);
   const epNextData = extractNextData(epHtml);
   return epNextData
     ? extractEpisodeTextFromNextData(epNextData)
@@ -1907,9 +1913,35 @@ function deleteTrigger() {
 // ==========================================
 // 共通ユーティリティ
 // ==========================================
+// 作品ID。カクヨムは数字（kakuyomu.jp/works/<数字>）、小説家になろうは Nコード
+//   （ncode.syosetu.com/<n1234ab>。小文字に揃える）。R18 の novel18.syosetu.com は認識しない（対象外）。
+//   記録のキー（RESUME_<workId>）にそのまま使うので、両サイトの ID が衝突しない形であること。
 function extractWorkId(url) {
-  const m = url.match(/kakuyomu\.jp\/works\/(\d+)/);
-  return m ? m[1] : null;
+  const s = String(url || '');
+  const k = s.match(/kakuyomu\.jp\/works\/(\d+)/);
+  if (k) return k[1];
+  const n = s.match(/(?:^|\/\/|\.)ncode\.syosetu\.com\/(n\d+[a-z]+)(?=[\/?#]|$)/i);
+  if (n) return n[1].toLowerCase();
+  return null;
+}
+
+const NAROU_BASE_URL = 'https://ncode.syosetu.com';
+
+// 作品ID がなろうの Nコードか（サイトの判別。取得処理の振り分けに使う）
+function isNarouWorkId_(workId) {
+  return /^n\d+[a-z]+$/.test(String(workId || ''));
+}
+
+function narouWorkUrl_(ncode) {
+  return `${NAROU_BASE_URL}/${ncode}/`;
+}
+
+// 記録に残す作品URL。なろうは話のページ（/n1234ab/12/）や大文字の Nコードで入力されても
+//   目次の URL に揃える（索引のリンク・削除済みリストの照合を作品単位にするため）。
+//   カクヨムは従来どおり入力をそのまま使う。
+function canonicalWorkUrl_(url) {
+  const workId = extractWorkId(url);
+  return isNarouWorkId_(workId) ? narouWorkUrl_(workId) : url;
 }
 
 function fetchHtml(url) {

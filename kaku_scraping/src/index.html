@@ -87,6 +87,11 @@
       td.num, th.num { text-align: right; white-space: nowrap; }
       .title-short { font-weight: 600; }
       .title-full { font-size: 11px; color: var(--muted); word-break: break-all; }
+      .site-tag {
+        display: inline-block; font-size: 10px; font-weight: 400; color: var(--muted);
+        border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; margin-right: 5px;
+        vertical-align: 1px;
+      }
       .docs a { font-size: 12px; margin-right: 6px; white-space: nowrap; }
       .row-actions { display: flex; gap: 6px; white-space: nowrap; }
       #log { font-size: 12px; color: var(--muted); max-height: 180px; overflow-y: auto; }
@@ -112,8 +117,8 @@
 
       <div class="card">
         <h2>取得</h2>
-        <label for="url">作品URL</label>
-        <input type="text" id="url" placeholder="https://kakuyomu.jp/works/...">
+        <label for="url">作品URL（カクヨム / 小説家になろう。なろうは話のページの URL でも可。R18 作品は対象外）</label>
+        <input type="text" id="url" placeholder="https://kakuyomu.jp/works/... または https://ncode.syosetu.com/n.../">
         <details>
           <summary>詳細オプション（初回取得の範囲指定・既存ドキュメントの紐付け）</summary>
           <div class="grid3">
@@ -265,6 +270,7 @@
       var busy = false;
       var timer = null;
       var POLL_MS = 7000; // 実行中のポーリング間隔（待機中はそもそもポーリングしない）
+      var SITE_LABELS = { kakuyomu: 'カクヨム', narou: 'なろう' }; // 一覧の取得元サイト表示（webGetState の site）
       var lastState = null;                                      // 直近に取得した状態
       var view = { sortKey: 'updatedAt', sortDir: 'desc' };       // 一覧の並び替え設定
 
@@ -743,10 +749,15 @@
           var tdTitle = document.createElement('td');
           var d1 = document.createElement('div');
           d1.className = 'title-short';
+          d1.style.display = 'inline';
           d1.textContent = w.shortTitle;           // textContent なので HTML として解釈されない
           var d2 = document.createElement('div');
           d2.className = 'title-full';
           d2.textContent = w.title;
+          var tag = document.createElement('span');   // 取得元サイト（カクヨム / なろう）
+          tag.className = 'site-tag';
+          tag.textContent = SITE_LABELS[w.site] || SITE_LABELS.kakuyomu;
+          tdTitle.appendChild(tag);
           tdTitle.appendChild(d1);
           tdTitle.appendChild(d2);
 

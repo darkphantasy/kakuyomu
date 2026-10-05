@@ -1,6 +1,6 @@
 # カクヨム → Google ドキュメント保存パイプライン
 
-Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形済みの Google ドキュメントとして保存する。続き取得・一括更新・索引スプレッドシート生成・Web UI まで含む。会話・報告・コミットメッセージは日本語。
+Google Apps Script (GAS) 製。カクヨムと小説家になろうの小説を全話取得し、整形済みの Google ドキュメントとして保存する。続き取得・一括更新・索引スプレッドシート生成・Web UI まで含む。会話・報告・コミットメッセージは日本語。
 
 ## 作業の型(最初に読む)
 
@@ -16,7 +16,8 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 
 `kaku_scraping/src/` が GAS プロジェクト(KAKU_SCRAPING)の実体で、clasp で同期している。GAS は同一プロジェクト内の全ファイルを 1 つのグローバルスコープで実行するため、ファイル間の import/export は無い。
 
-- `Kakuyomu_to_docs.js` … 本体。取得・整形パイプライン、続き取得、キュー、索引シート
+- `Kakuyomu_to_docs.js` … 本体。取得・整形パイプライン、続き取得、キュー、索引シート。カクヨム固有の目次・本文抽出と、サイト判別(`extractWorkId` / `isNarouWorkId_` / `canonicalWorkUrl_`)もここ
+- `Narou.js` … 小説家になろう固有の部品だけ(目次の取得 `loadNarouCatalog_`、本文の抽出 `extractNarouEpisodeText_`)。パイプライン本体からは `loadWorkCatalog_` / `extractEpisodeText_` が作品ID の形で振り分ける
 - `WebApp.js` … Web アプリのサーバー側。`doGet` と、クライアントから `google.script.run` で呼ばれる `web*` 関数群
 - `index.html` … Web UI 本体(単一ファイル。CSS/JS 込み)。`.claspignore` が `!*.html` を許可しているので同期対象
 - `appsscript.json` … マニフェスト(Docs API 有効化・OAuth スコープ・`webapp` 設定)
@@ -66,6 +67,7 @@ Google Apps Script (GAS) 製。カクヨムの小説を全話取得し、整形�
 - **完了処理**(`finishRun`): バッファ掃除 → 記録保存 → サイズキャッシュ無効化 → 索引シート再生成 → run 状態クリア → バッチなら次へ(残り 60 秒以上なら同一枠で `batchStartNext` を直結、足りなければトリガーに回す。直結の結果が `BATCH_DEFERRED` ならそのまま return、`BATCH_EXHAUSTED` なら `finishBatch_` して DONE)。`clearRunState` は `PHASE` を消さない(下記の再発防止を参照)が、それでもバッチを続ける場合は `batchStartNext` を呼ぶ前に必ず `PHASE_BATCH_NEXT` を明示的に立てる(表示上の phase 文言を正しくするため)。
 - **索引シート**(`updateIndexSpreadsheet`): 全記録から毎回再生成。列は「短縮作品名 / 作品タイトル / 話数 / ファイル数 / 最終更新 / 元URL / ファイル1..N」。短縮作品名は表示専用で、復元(`parseIndexSheetRow_`)には使わない。**列を増減させたら必ず `parseIndexSheetRow_` の列番号も直す**。並び順は `compareWorksForDisplay_`(索引・Web UI 共通。最終更新降順 → タイトル → 作品ID。`updatedAt` は分単位なので同値が普通に起き、タイブレークが無いと行が入れ替わる)。ID は `INDEX_SHEET_ID`、タブ名は `INDEX_SHEET_TAB_NAME`。索引シートは**記録の復旧手段**(`rebuildRecordsFromSheet` / `syncResumeRecordsFromSheet`)でもあるので廃止しない。
 - **削除済みリスト**(`REMOVED_<workId>`): 一覧から削除した作品を覚えておき、再取得・再登録の前に確認を出す(既読の作品を取り直さないため)。値は `{title,url,total,docIds,removedAt}`(`total` は削除時点の取得済み話数)。**`RESUME_` と `REMOVED_` に同じ作品が同時に載ることはない**: 削除(`clearResumeRecord`、および `syncResumeRecordsFromSheet` でシートから行が消えた作品)で `markRemoved_` → `RESUME_` を消す、の順に移し、**`saveResumeRecord` が保存のたびに `REMOVED_` を消す**(再登録・再取得の完了で自動的に外れる。取得中はまだ残る)。確認は Web の入口だけ: `webStartFetch`(初回取得のみ。続き取得は一覧にある作品が対象なので不要)・`webSeedResumeRecord`・`webSeedSelected` が、削除済みの作品を含むと処理を始める前に `{ok:false, needConfirm:true, message}`(`removedConfirm_`)を返す。**順番待ちに積む前に確認する**(積んだ後では聞けない)。クライアントの `call()` が `confirm(message)` し、OK なら同じ関数を**引数の末尾に `confirmed=true` を足して**呼び直す(そのため確認を返す `web*` には省略可能な引数も全部渡す)。GAS エディタからの `startFetch` / `seedResumeRecord` はログに警告(`logRemovedWarning_`)を出すだけで続行する。手動で外すのは `webForgetRemoved`。過去の削除ぶんは遡って記録しない(この機能を入れた時点から空で始める)。索引スプレッドシートの「削除済み」タブ(`REMOVED_SHEET_TAB_NAME`、`writeRemovedSheet_`)は `updateIndexSpreadsheet` が毎回作り直す表示専用で、復元には使わない。書き込みに失敗しても索引本体の更新は済ませる(try/catch)。
+- **サイト対応(カクヨム / 小説家になろう)**: パイプライン(FETCHING / BUILD / 続き取得 / キュー / 索引 / 次話 / 削除済み)はサイト共通で、サイトごとに違うのは**作品ID・目次・本文抽出の 3 点だけ**。作品ID の形で判別する(カクヨムは数字、なろうは Nコード `n\d+[a-z]+` を小文字に揃えたもの。`RESUME_<workId>` 等のキーでも衝突しない)。`loadWorkCatalog_(url, workId)` と `extractEpisodeText_(html, workId)` の先頭で `isNarouWorkId_` なら `Narou.js` に回す。なろうは記録・run 状態に残す URL を `canonicalWorkUrl_` で目次の URL(`https://ncode.syosetu.com/<ncode>/`)に揃える(話のページの URL を入力されても作品単位で扱うため。カクヨムは入力どおり)。R18(`novel18.syosetu.com`)は `extractWorkId` が認識しないので対象外。なろうの構造(2026-10 の実物で確認): 目次は `?p=N` で 1 ページ 100 話、最終ページ番号は `c-pager__item--last` のリンク、各話は `<a href="/<ncode>/<話番号>/" class="p-eplist__subtitle">`、作品タイトルは `<h1 class="p-novel__title">`。本文は `js-novel-text p-novel__text`(前書き `--preface`・後書き `--afterword`)で、**前書き・後書きは `NAROU_PART_SEPARATOR` の区切り線を挟んで本文の前後に置く**。ルビは `<rp>` 付きなので既存の `stripHtmlTags` で「漢字（かな）」になる。短編(目次が無く本文が作品ページにある)は ID `'short'` の 1 話として扱う。目次の途中のページが取れなければ `null`(部分的な一覧で続き取得の起点を誤らないため)。話の ID は話番号なので、作者が途中の話を削除すると `lastEpisodeId` の照合がずれうる(記録の話数フォールバックに任せる既知の割り切り)。取得間隔はカクヨムと同じ `FETCH_PARALLEL` / `FETCH_SLEEP_MS`、目次のページ送りは両サイト共通の `TOC_PAGE_SLEEP_MS`(800ms)。失敗が出るようなら**なろうだけ**間隔を空ける方針(ユーザー合意済み)。「候補から選んで登録」はカクヨム専用のまま(なろうのブックマーク画面からの抽出は未着手)。
 - **ファイル名短縮**(`shortenTitleForFileName_`): `createBuildDoc` が Drive の**ファイル名にのみ**使う。本文見出し・記録・索引・フッターは常に正タイトル。ルールベース: ①「本題 〜サブタイトル〜」を除去(`〜` U+301C と `～` U+FF5E は別コードポイント。両対応)、②`【】［］（）` の注記を除去、③ `SHORT_FILENAME_MAX_LEN`(30)超なら読点区切り、無ければ機械的トリミング+「…」。既知の制約(不自然な切れ方・一意性低下)は許容済み。ON/OFF は Script Property `SHORT_FILENAME`(既定 ON)。
 
 ## Web UI(唯一の操作インターフェース)
