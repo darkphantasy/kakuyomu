@@ -98,6 +98,16 @@
       #log div { padding: 3px 0; border-bottom: 1px solid #eef0f3; }
       #log .err { color: var(--danger); }
       .empty { color: var(--muted); font-size: 13px; padding: 10px 0; }
+      /* ページ上端・下端へ移動する固定ボタン（マウスジェスチャの拡張機能が iframe 内のスクロールに
+         届かない環境の代わり）。<button> にしないのは、処理中に setBusy() が全 <button> を無効化するため */
+      .scroll-nav { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 10; }
+      a.scroll-btn {
+        display: flex; align-items: center; justify-content: center;
+        width: 40px; height: 40px; border: 1px solid var(--line); border-radius: 50%;
+        background: rgba(255, 255, 255, .92); color: var(--accent); font-size: 18px; line-height: 1;
+        text-decoration: none; box-shadow: 0 1px 4px rgba(0, 0, 0, .18); user-select: none;
+      }
+      a.scroll-btn:hover { background: #eef1f5; }
       @media (max-width: 640px) {
         .grid3 { grid-template-columns: 1fr; }
         .hide-sp { display: none; }
@@ -268,6 +278,11 @@
       </div>
     </div>
 
+    <nav class="scroll-nav" aria-label="ページ内の移動">
+      <a class="scroll-btn" id="scrollTop" href="#" role="button" title="ページの先頭へ" aria-label="ページの先頭へ" onclick="return scrollToEdge('top')">↑</a>
+      <a class="scroll-btn" id="scrollBottom" href="#" role="button" title="ページの末尾へ" aria-label="ページの末尾へ" onclick="return scrollToEdge('bottom')">↓</a>
+    </nav>
+
     <script>
       var busy = false;
       var timer = null;
@@ -281,6 +296,19 @@
       //   ここに状態を持つだけで render() 側からは触らない。
       var activeTab = 'works'; // 'works' | 'seed' | 'removed'
       var TAB_NAMES = ['works', 'seed', 'removed'];
+
+      // ページの先頭／末尾へ移動する（右下の固定ボタン）。
+      //   GAS の Web アプリは iframe の中で動くため、マウスジェスチャ拡張が外枠をスクロールしようと
+      //   して効かないことがある。ここは iframe 内のページ自身（window）をスクロールする。
+      //   false を返して、href="#" によるページ内の移動（先頭への飛び）を止める。
+      function scrollToEdge(where) {
+        var top = (where === 'top') ? 0 : Math.max(
+          document.documentElement ? document.documentElement.scrollHeight : 0,
+          document.body ? document.body.scrollHeight : 0);
+        try { window.scrollTo({ top: top, behavior: 'smooth' }); }
+        catch (e) { window.scrollTo(0, top); } // smooth 指定に未対応の古いブラウザ
+        return false;
+      }
 
       function setActiveTab(tab) {
         activeTab = tab;

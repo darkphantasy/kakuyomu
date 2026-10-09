@@ -14,6 +14,7 @@
 //   buttons   … querySelectorAll('button') が返す配列（disabled を見る）
 //   timers    … setTimeout の記録 [{fn, delay}]（既定では実行しない。fn() で手動発火）
 //   listeners … addEventListener の記録 type → [fn]（document と window で共有）
+//   scrolls   … window.scrollTo の呼び出し引数の記録
 //
 // opts:
 //   runner        … google.script.run の実体。オブジェクトか、呼ぶたびに新しい実体を返す関数
@@ -25,6 +26,7 @@
 //   stubFetchers  … true（既定）なら renderTable / refreshChangedWorks / maybeFetchProgress /
 //                   maybeFetchSizes を空関数にして、render() が状態行とログだけを扱うようにする
 //   hidden        … document.hidden の初期値
+//   scrollHeight  … document.documentElement / body の scrollHeight（既定 0）
 const fs   = require('fs');
 const vm   = require('vm');
 const path = require('path');
@@ -42,7 +44,7 @@ function createUiSandbox(opts = {}) {
   const state = {
     texts: {}, classes: {}, logs: [],
     buttons: opts.buttons || [{ disabled: false }, { disabled: false }],
-    timers: [], listeners: {},
+    timers: [], listeners: {}, scrolls: [],
   };
   const elements = {};
 
@@ -71,6 +73,8 @@ function createUiSandbox(opts = {}) {
 
   const document = {
     hidden: !!opts.hidden,
+    documentElement: { scrollHeight: opts.scrollHeight || 0 },
+    body: { scrollHeight: opts.scrollHeight || 0 },
     getElementById: element,
     querySelectorAll: sel => (sel === '.tab-btn' ? state.tabButtons : state.buttons),
     addEventListener(type, fn) { (state.listeners[type] = state.listeners[type] || []).push(fn); },
@@ -84,7 +88,7 @@ function createUiSandbox(opts = {}) {
   const runner = opts.runner;
   const sandbox = {
     console, document,
-    window: { addEventListener: document.addEventListener },
+    window: { addEventListener: document.addEventListener, scrollTo: (...a) => { state.scrolls.push(a); } },
     google: { script: { get run() { return (typeof runner === 'function') ? runner() : runner; } } },
     setTimeout: opts.setTimeout || ((fn, delay) => { state.timers.push({ fn, delay }); return state.timers.length; }),
     clearTimeout: opts.clearTimeout || (() => {}),
