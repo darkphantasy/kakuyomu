@@ -57,6 +57,8 @@ const INDEX_SHEET_NAME     = '【索引】カクヨム取得作品（表）';
 const INDEX_SHEET_TAB_NAME = '索引'; // 索引スプレッドシート内のシート（タブ）名
 const REMOVED_SHEET_TAB_NAME = '削除済み'; // 同じスプレッドシート内の、一覧から削除した作品のタブ
 
+const CHAPTER_HEADING_LEVEL = 3; // 章の見出しレベル（文書タイトルは HEADING_2、話は HEADING_4）
+const EPISODE_HEADING_LEVEL = 4; // 話の見出しレベル（2026-10 に 3 から変更。保存済みのドキュメントは書き換えない）
 const SHORT_FILENAME_MAX_LEN = 30; // ファイル名短縮：これを超えたら読点区切り or 強制トリミング
 
 // runの途中経過に使うプロパティキー（完了時にこれだけ消す。記録・索引IDは残す）
@@ -343,6 +345,34 @@ function startFetch(url, startEpisode, endEpisode) {
   if (prepareFetch(url, startEpisode, endEpisode)) continuesFetch();
 }
 
+// 今回の取得対象（allEpisodes の startIndex 以上 endEx 未満）を run 状態に持たせる形にする。
+//   no … 作品全体での通し番号（1 始まり）。
+//   ch … 章タイトル。**この話の直前に章の見出しを出すときだけ**付ける（run 状態は Script Property に
+//        全話ぶん入るので、全話に章名を持たせて大きくしない）。出す条件は「直前に現れた章と違う章に
+//        属する話」。章に属さない話（章なし）は見出しを出さず、章の続きも途切れさせない
+//        （カクヨムの目次順と公開日時順がずれても、同じ章の見出しが二重に出ない）。
+//   fresh … 初回取得（ドキュメントがここから始まる）なら、最初の話が属する章の見出しを出す。
+//        続き取得は、直前までの話から現在の章を割り出し、章の途中からなら見出しを繰り返さない
+//        （記録に章の項目を増やさずに済む）。
+function buildRunEpisodes_(allEpisodes, startIndex, endEx, fresh) {
+  let current = '';
+  if (!fresh) {
+    for (let i = startIndex - 1; i >= 0; i--) {
+      if (allEpisodes[i].chapter) { current = allEpisodes[i].chapter; break; }
+    }
+  }
+  return allEpisodes.slice(startIndex, endEx).map((e, j) => {
+    const ep = { id: e.id, title: e.title, url: e.url, no: startIndex + j + 1 };
+    if (e.chapter && e.chapter !== current) { ep.ch = e.chapter; current = e.chapter; }
+    return ep;
+  });
+}
+
+// 章タイトルの整形（改行・タブを空白にして前後を削る。全角スペースなど中の空白はそのまま）
+function cleanChapterTitle_(t) {
+  return String(t == null ? '' : t).replace(/[\r\n\t]+/g, ' ').trim();
+}
+
 // 初回取得の準備。run 状態をセットしたら true、失敗なら false。
 //   ※ 実際の取得開始（continuesFetch / トリガー）は呼び出し側が行う。
 function prepareFetch(url, startEpisode, endEpisode) {
@@ -375,8 +405,7 @@ function prepareFetch(url, startEpisode, endEpisode) {
     Logger.log(`END_EPISODE(${endEp}) が START_EPISODE(${startEp}) 以下です。設定を確認してください。`);
     return false;
   }
-  const episodes = allEpisodes.slice(startIndex, endEx)
-    .map((e, j) => ({ ...e, no: startIndex + j + 1 })); // no=作品全体での通し番号(1始まり)
+  const episodes = buildRunEpisodes_(allEpisodes, startIndex, endEx, true);
 
   if (endEp > 0) {
     Logger.log(`【デバッグ】${startIndex + 1} 〜 ${endEx} 話のみ取得 (${episodes.length} 件)`);
@@ -553,8 +582,7 @@ function prepareContinuation(url) {
     return false;
   }
 
-  const episodes = allEpisodes.slice(startIndex)
-    .map((e, j) => ({ ...e, no: startIndex + j + 1 })); // no=作品全体での通し番号(1始まり)
+  const episodes = buildRunEpisodes_(allEpisodes, startIndex, allEpisodes.length, false);
   Logger.log(`続き取得: ${startIndex + 1} 〜 ${allEpisodes.length} 話 (${episodes.length} 件)`);
 
   const props = PropertiesService.getScriptProperties();
@@ -1156,7 +1184,9 @@ function runFetchPhase(props, startTime) {
 
         // タイトル末尾に通し番号を [000] 形式で付与（最低3桁、超過分は桁を増やす）
         const noLabel = (ep.no != null) ? ` [${String(ep.no).padStart(3, '0')}]` : '';
-        appended += `\n\n■ ${ep.title}${noLabel}\n\n${epText}`;
+        // 章の見出しは話の直前に □ 行で入れる（■ は話の見出し。parseBufferForBuild が見出しレベルに割り当てる）
+        const chapterLine = ep.ch ? `\n\n□ ${ep.ch}` : '';
+        appended += `${chapterLine}\n\n■ ${ep.title}${noLabel}\n\n${epText}`;
       }
 
       i = batchEnd;
@@ -1313,16 +1343,18 @@ function runBuildPhase(props, startTime) {
   finishRun(props, workId, docIds, startTime);
 }
 
-// バッファ本文を、■ を外し空行を除いたクリーンなテキストと見出し位置に分解する。
+// バッファ本文を、■ □ を外し空行を除いたクリーンなテキストと見出し位置に分解する。
+//   ■ … 話の見出し（HEADING_4）。□ … 章の見出し（HEADING_3）。
 //   段落間は単一改行のみ（空段落を作らない）。余白の足し込みはしない。
-//   返り値: { clean, titles: [{offset, len}] }（offset/len はクリーン内の位置）
+//   返り値: { clean, titles: [{offset, len, level}] }（offset/len はクリーン内の位置、level は見出しレベル 3 or 4）
 function parseBufferForBuild(bufContent) {
   const lines  = bufContent.split('\n');
   let clean    = '';
   const titles = [];
   for (let k = 0; k < lines.length; k++) {
     let line = lines[k];
-    const isTitle = (line.indexOf('■') === 0);
+    const isChapter = (line.indexOf('□') === 0);
+    const isTitle = isChapter || (line.indexOf('■') === 0);
     if (isTitle) {
       let cut = 1;
       while (cut < line.length &&
@@ -1339,23 +1371,23 @@ function parseBufferForBuild(bufContent) {
     if (clean.length > 0) clean += '\n';       // 段落間は単一改行
     const offset = clean.length;
     clean += line;
-    if (isTitle) titles.push({ offset: offset, len: line.length });
+    if (isTitle) titles.push({ offset: offset, len: line.length, level: isChapter ? CHAPTER_HEADING_LEVEL : EPISODE_HEADING_LEVEL });
   }
   return { clean: clean, titles: titles };
 }
 
-// クリーンテキストを挿入し、見出し3・太字・フォントを同一バッチで適用。
+// クリーンテキストを挿入し、見出し（章 3・話 4）・太字・フォントを同一バッチで適用。
 function insertCleanIntoDoc(docId, cursor, parsed) {
   const reqs = [];
   reqs.push({ insertText: { location: { index: cursor }, text: parsed.clean } });
 
-  // 見出し3（段落スタイル）
+  // 見出し（段落スタイル）。章は HEADING_3、話は HEADING_4。
   for (const t of parsed.titles) {
     const s = cursor + t.offset;
     reqs.push({
       updateParagraphStyle: {
         range: { startIndex: s, endIndex: s + t.len },
-        paragraphStyle: { namedStyleType: 'HEADING_3' },
+        paragraphStyle: { namedStyleType: 'HEADING_' + t.level },
         fields: 'namedStyleType',
       }
     });
@@ -1800,11 +1832,35 @@ function extractNextData(html) {
   try { return JSON.parse(m[1]); } catch(e) { return null; }
 }
 
+// カクヨムの目次の章：Work の tableOfContentsV2（章ごとのグループの並び）を読み、話 ID → 章タイトル の表にする。
+//   各グループは chapter（Chapter への参照。章に属さない話のグループは null）と episodeUnions（話の参照の並び）を持つ。
+//   章の階層（level）は見ない（この作品群では 1 段のみ確認。2 段あるものは、より内側の章名だけが出る）。
+function extractKakuyomuChapters_(apollo, workId) {
+  const map = {};
+  try {
+    const work = apollo['Work:' + workId];
+    const tocKey = work && Object.keys(work).find(k => k.indexOf('tableOfContents') === 0);
+    const toc = tocKey && work[tocKey];
+    if (!Array.isArray(toc)) return map;
+    toc.forEach(ref => {
+      const group = ref && apollo[ref.__ref];
+      const chapter = group && group.chapter && apollo[group.chapter.__ref];
+      const title = chapter ? cleanChapterTitle_(chapter.title) : '';
+      if (!title) return;
+      (group.episodeUnions || []).forEach(e => {
+        if (e && e.__ref) map[String(e.__ref).replace('Episode:', '')] = title;
+      });
+    });
+  } catch(e) { Logger.log('章の抽出エラー: ' + e); }
+  return map;
+}
+
 function extractEpisodesFromNextData(nextData, workId) {
   const episodes = [];
   try {
     const apollo = nextData.props.pageProps.__APOLLO_STATE__;
     if (!apollo) return episodes;
+    const chapters = extractKakuyomuChapters_(apollo, workId);
 
     Object.keys(apollo)
       .filter(k => k.startsWith('Episode:') && apollo[k].title)
@@ -1814,7 +1870,8 @@ function extractEpisodesFromNextData(nextData, workId) {
         episodes.push({
           id:    epId,
           title: apollo[key].title,
-          url:   `https://kakuyomu.jp/works/${workId}/episodes/${epId}`
+          url:   `https://kakuyomu.jp/works/${workId}/episodes/${epId}`,
+          chapter: chapters[epId] || '',
         });
       });
   } catch(e) { Logger.log('エピソード抽出エラー: ' + e); }

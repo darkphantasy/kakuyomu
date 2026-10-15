@@ -65,13 +65,13 @@ function reformatDoc(docId) {
   const content = (doc.body && doc.body.content) || [];
 
   let end = 1; // ドキュメント本文の先頭インデックス
-  const headings = []; // HEADING_2 / HEADING_3 の段落（タイトル・話見出し）
+  const headings = []; // HEADING_2〜4 の段落（文書タイトル・章見出し・話見出し。話見出しは以前は HEADING_3）
   for (const el of content) {
     const start = end; // 直前要素の終端＝この要素の開始位置
     if (typeof el.endIndex === 'number' && el.endIndex > end) end = el.endIndex;
     if (!el.paragraph) continue;
     const ns = el.paragraph.paragraphStyle && el.paragraph.paragraphStyle.namedStyleType;
-    if ((ns === 'HEADING_2' || ns === 'HEADING_3') && typeof el.endIndex === 'number') {
+    if ((ns === 'HEADING_2' || ns === 'HEADING_3' || ns === 'HEADING_4') && typeof el.endIndex === 'number') {
       headings.push({ start: start, end: el.endIndex - 1 });
     }
   }

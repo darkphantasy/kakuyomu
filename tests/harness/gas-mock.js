@@ -16,6 +16,7 @@
 //   createdDocs  … Docs.Documents.create の呼び出し回数（docId は 'DOC<n>'）
 //   triggers     … 登録中のトリガー（ハンドラ関数名の配列）
 //   batchUpdates … Docs.batchUpdate の記録 [{id, n}]
+//   docRequests  … Docs.batchUpdate のリクエスト全体 [{id, requests}]（見出しレベルなど書式の検査用）
 //   insertedTexts … Docs.batchUpdate の insertText で挿入した文字列（挿入順）
 //   sheetOps     … 索引シートへの操作名の記録
 //   sheetRows    … 索引スプレッドシートのタブ名 → 最後に setValues した2次元配列
@@ -36,10 +37,26 @@ const path = require('path');
 const SRC_DIR = path.join(__dirname, '..', '..', 'kaku_scraping', 'src');
 
 // カクヨムの作品ページ（目次）を模した HTML。n 話ぶんのエピソードを持つ
-function workPage(workId, title, n) {
+//   opts.toc … 章つきの目次（Work.tableOfContentsV2）を足す。章のグループの並び:
+//              [{ chapter: '章名' | null, eps: [話の番号(1始まり), ...] }, ...]
+//              （chapter:null は章に属さない話。話の公開日時は番号順なので、目次の並びと変えて
+//               「目次順と公開日時順がずれる」ケースも作れる）
+function workPage(workId, title, n, opts = {}) {
   const apollo = { [`Work:${workId}`]: { title } };
   for (let i = 0; i < n; i++) {
     apollo[`Episode:${100 + i}`] = { title: `第${i + 1}話`, publishedAt: `2026-01-${String(i + 1).padStart(2, '0')}` };
+  }
+  if (opts.toc) {
+    apollo[`Work:${workId}`].tableOfContentsV2 = opts.toc.map((g, gi) => {
+      const key = `TableOfContentsChapter:${g.chapter ? 900 + gi : ''}`;
+      apollo[key] = {
+        __typename: 'TableOfContentsChapter', id: g.chapter ? String(900 + gi) : '',
+        chapter: g.chapter ? { __ref: `Chapter:${900 + gi}` } : null,
+        episodeUnions: g.eps.map(no => ({ __ref: `Episode:${100 + no - 1}` })),
+      };
+      if (g.chapter) apollo[`Chapter:${900 + gi}`] = { __typename: 'Chapter', id: String(900 + gi), level: 1, title: g.chapter };
+      return { __ref: key };
+    });
   }
   return `<html><script id="__NEXT_DATA__">${JSON.stringify({ props: { pageProps: { __APOLLO_STATE__: apollo } } })}</script></html>`;
 }
@@ -51,8 +68,8 @@ function episodePage(i) {
 }
 
 // workId の作品（n 話）の目次 URL と各話 URL を htmlByUrl に登録する
-function registerWork(htmlByUrl, workId, title, n) {
-  htmlByUrl[`https://kakuyomu.jp/works/${workId}`] = workPage(workId, title, n);
+function registerWork(htmlByUrl, workId, title, n, opts) {
+  htmlByUrl[`https://kakuyomu.jp/works/${workId}`] = workPage(workId, title, n, opts);
   for (let i = 0; i < n; i++) {
     htmlByUrl[`https://kakuyomu.jp/works/${workId}/episodes/${100 + i}`] = episodePage(i + 1);
   }
@@ -61,11 +78,13 @@ function registerWork(htmlByUrl, workId, title, n) {
 
 // ---- 小説家になろう（ncode.syosetu.com）を模した HTML。実物（2026-10）と同じクラス名・URL 形だけを持つ ----
 // 目次の1ページ（1ページ 100 話。page は 1 始まり、n は全話数）
-function narouTocPage(ncode, title, n, page) {
+//   chapters … 章タイトル [{ before: 話番号, title }]（その話の直前に章タイトルを置く）
+function narouTocPage(ncode, title, n, page, chapters = []) {
   const perPage = 100;
   const last = Math.max(1, Math.ceil(n / perPage));
   let items = '';
   for (let i = (page - 1) * perPage + 1; i <= Math.min(n, page * perPage); i++) {
+    chapters.filter(c => c.before === i).forEach(c => { items += `<div class="p-eplist__chapter-title">${c.title}</div>\n`; });
     items += `<div class="p-eplist__sublist">\n<a href="/${ncode}/${i}/" class="p-eplist__subtitle">\n第${i}話 &amp; 話\n</a>\n<div class="p-eplist__update">2026/01/01</div>\n</div>\n`;
   }
   const pager = (last > 1)
@@ -88,11 +107,11 @@ function narouEpisodePage(i, opts = {}) {
 }
 
 // ncode の作品（n 話）の目次全ページと各話 URL を htmlByUrl に登録する
-function registerNarouWork(htmlByUrl, ncode, title, n, epOpts) {
+function registerNarouWork(htmlByUrl, ncode, title, n, epOpts, chapters) {
   const base = `https://ncode.syosetu.com/${ncode}/`;
   const last = Math.max(1, Math.ceil(n / 100));
-  htmlByUrl[base] = narouTocPage(ncode, title, n, 1);
-  for (let p = 2; p <= last; p++) htmlByUrl[`${base}?p=${p}`] = narouTocPage(ncode, title, n, p);
+  htmlByUrl[base] = narouTocPage(ncode, title, n, 1, chapters);
+  for (let p = 2; p <= last; p++) htmlByUrl[`${base}?p=${p}`] = narouTocPage(ncode, title, n, p, chapters);
   for (let i = 1; i <= n; i++) htmlByUrl[`${base}${i}/`] = narouEpisodePage(i, epOpts);
   return htmlByUrl;
 }
@@ -100,7 +119,7 @@ function registerNarouWork(htmlByUrl, ncode, title, n, epOpts) {
 function createGasSandbox(opts = {}) {
   const state = {
     props: {}, files: {}, docs: {}, createdDocs: 0, triggers: [],
-    batchUpdates: [], insertedTexts: [], sheetOps: [], sheetRows: {}, htmlByUrl: opts.htmlByUrl || {}, cache: {}, logs: [],
+    batchUpdates: [], docRequests: [], insertedTexts: [], sheetOps: [], sheetRows: {}, htmlByUrl: opts.htmlByUrl || {}, cache: {}, logs: [],
   };
 
   const propsApi = {
@@ -211,6 +230,7 @@ function createGasSandbox(opts = {}) {
         get: id => ({ body: { content: [{ endIndex: state.docs[id].end }] } }),
         batchUpdate: (req, id) => {
           state.batchUpdates.push({ id, n: req.requests.length });
+          state.docRequests.push({ id, requests: req.requests });
           req.requests.forEach(r => { if (r.insertText) { state.docs[id].end += r.insertText.text.length; state.insertedTexts.push(r.insertText.text); } });
         },
         create: () => {

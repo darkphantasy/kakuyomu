@@ -35,7 +35,7 @@ function loadNarouCatalog_(ncode) {
   if (!topHtml) return null;
 
   const title = extractNarouTitle_(topHtml);
-  let episodes = extractNarouEpisodes_(topHtml, ncode);
+  let episodes = extractNarouEpisodes_(topHtml, ncode, '');
 
   if (episodes.length === 0) {
     // 短編：目次が無く、作品ページに本文が直接ある
@@ -48,12 +48,16 @@ function loadNarouCatalog_(ncode) {
   const lastPage = Math.min(extractNarouLastPage_(topHtml, ncode), NAROU_TOC_MAX_PAGES);
   const seen = {};
   episodes.forEach(e => { seen[e.id] = true; });
+  // 章がページをまたぐと、次のページの先頭には章タイトルが出ない。前のページ末尾の章を引き継ぐ。
+  let carryChapter = episodes.length ? episodes[episodes.length - 1].chapter : '';
   for (let page = 2; page <= lastPage; page++) {
     Utilities.sleep(TOC_PAGE_SLEEP_MS);
     const html = fetchHtml(`${topUrl}?p=${page}`);
     if (!html) { Logger.log(`なろう目次の取得に失敗（${page} / ${lastPage} ページ）`); return null; }
     let added = 0;
-    extractNarouEpisodes_(html, ncode).forEach(e => {
+    const pageEpisodes = extractNarouEpisodes_(html, ncode, carryChapter);
+    if (pageEpisodes.length) carryChapter = pageEpisodes[pageEpisodes.length - 1].chapter;
+    pageEpisodes.forEach(e => {
       if (seen[e.id]) return;
       seen[e.id] = true;
       episodes.push(e);
@@ -75,16 +79,23 @@ function extractNarouTitle_(html) {
   return '不明なタイトル';
 }
 
-// 目次1ページぶんの話一覧（ページ内の出現順 = 話番号順）
-function extractNarouEpisodes_(html, ncode) {
+// 目次1ページぶんの話一覧（ページ内の出現順 = 話番号順）。
+//   章タイトル（<div class="p-eplist__chapter-title">）は、その章の最初の話の直前に置かれ、次の章タイトルまで続く。
+//   各話の chapter に所属する章名（章に属さない話は ''）を入れる。startChapter は前のページから続く章。
+function extractNarouEpisodes_(html, ncode, startChapter) {
   const episodes = [];
-  const re = new RegExp(`<a[^>]+href="/${ncode}/(\\d+)/"[^>]*class="[^"]*\\bp-eplist__subtitle\\b[^"]*"[^>]*>([\\s\\S]*?)</a>`, 'g');
+  let chapter = cleanChapterTitle_(startChapter);
+  const re = new RegExp(
+    `<div[^>]+class="[^"]*\\bp-eplist__chapter-title\\b[^"]*"[^>]*>([\\s\\S]*?)</div>` +
+    `|<a[^>]+href="/${ncode}/(\\d+)/"[^>]*class="[^"]*\\bp-eplist__subtitle\\b[^"]*"[^>]*>([\\s\\S]*?)</a>`, 'g');
   let m;
   while ((m = re.exec(html)) !== null) {
+    if (m[2] === undefined) { chapter = cleanChapterTitle_(stripHtmlTags(m[1])); continue; }
     episodes.push({
-      id:    m[1],
-      title: stripHtmlTags(m[2]) || `第${m[1]}話`,
-      url:   `${NAROU_BASE_URL}/${ncode}/${m[1]}/`,
+      id:    m[2],
+      title: stripHtmlTags(m[3]) || `第${m[2]}話`,
+      url:   `${NAROU_BASE_URL}/${ncode}/${m[2]}/`,
+      chapter: chapter,
     });
   }
   return episodes;
