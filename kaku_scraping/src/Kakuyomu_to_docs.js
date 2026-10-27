@@ -77,6 +77,7 @@ const RUN_STATE_KEYS = [
   'CONTINUATION', 'CONT_FROM', 'CONT_TO', 'CONT_LAST_CURSOR',
   'BUILD_BUF_INDEX', 'BUILD_CURSOR', 'BUILD_DOC_ID', 'BUILD_DOC_PART',
   'BUILD_FOOTER_DONE', 'BUILD_NEED_SEP',
+  'ORDER_MODE', 'CONT_RANGES',
 ];
 
 // ==========================================
@@ -251,7 +252,10 @@ function buildFooterLines(props) {
     `話数: ${total} 話（取得時点の総話数）`,
   ];
   if (props.getProperty('CONTINUATION') === '1') {
-    lines.push(`今回追記: ${props.getProperty('CONT_FROM')}〜${props.getProperty('CONT_TO')} 話`);
+    const ranges = props.getProperty('CONT_RANGES'); // 目次順の作品で、飛び飛びに追記したとき
+    lines.push(ranges
+      ? `今回追記: ${ranges} 話`
+      : `今回追記: ${props.getProperty('CONT_FROM')}〜${props.getProperty('CONT_TO')} 話`);
   }
   lines.push(`取得日時: ${stamp}`);
   return lines;
@@ -361,11 +365,96 @@ function buildRunEpisodes_(allEpisodes, startIndex, endEx, fresh) {
       if (allEpisodes[i].chapter) { current = allEpisodes[i].chapter; break; }
     }
   }
-  return allEpisodes.slice(startIndex, endEx).map((e, j) => {
-    const ep = { id: e.id, title: e.title, url: e.url, no: startIndex + j + 1 };
+  const indices = [];
+  for (let i = startIndex; i < endEx; i++) indices.push(i);
+  return buildRunEpisodesAt_(allEpisodes, indices, current);
+}
+
+// buildRunEpisodes_ の本体。indices は取得する話の allEpisodes 上の位置（昇順。飛び飛びでもよい）、
+//   current はドキュメント末尾の時点で続いている章（無ければ ''）。no は目次（並び）上の位置 + 1。
+function buildRunEpisodesAt_(allEpisodes, indices, current) {
+  current = current || '';
+  return indices.map(i => {
+    const e = allEpisodes[i];
+    const ep = { id: e.id, title: e.title, url: e.url, no: i + 1 };
     if (e.chapter && e.chapter !== current) { ep.ch = e.chapter; current = e.chapter; }
     return ep;
   });
+}
+
+// ==========================================
+// 目次順の取得（カクヨムの新規作品）
+//   作者が推敲で話を入れ替えたり途中に挿入したりしても、手直し無しで取りこぼし・重複が起きないようにする。
+//   ・取得順と通し番号を目次（tableOfContentsV2）の順にする（従来は公開日時順）。
+//   ・作品ごとに「取得済みの話 ID の一覧」を保存先フォルダの __kakuyomu_seen_<workId>.json に持ち
+//     （話数が多いと Script Properties に入れるには大きいため）、続き取得では
+//     **目次にあって、まだ取っていない話をすべて**取る（従来は「最後に取った話より後ろ」だけ）。
+//     入れ替えられただけの話は取得済みなので取り直さない。途中に挿入された話はドキュメントの
+//     末尾に追記する（追記しかできないため。通し番号は目次上の位置）。
+//   ・対象は、この仕組みを入れた後に初回取得・選択登録（既存ドキュメントの指定なし）したカクヨムの作品だけ。
+//     記録に order:'toc' の印を付け、印の無い作品（保存済みの作品・なろう・索引シートから復元した記録）は
+//     従来どおりの処理のまま。なろうは話 ID が位置そのもので固定 ID が無いため、今回は対象外（ユーザー判断）。
+//   ・一覧の書き込みに失敗しても重複して取らないよう、記録に件数（seenCount）を持たせ、
+//     一覧のほうが少なければ「最後に取った話まで」を取得済みとみなして補う。
+// ==========================================
+const ORDER_MODE_TOC   = 'toc';
+const SEEN_FILE_PREFIX = '__kakuyomu_seen_';
+
+// 新規に取得・登録する作品の並び方（'' は従来どおり）
+function orderModeForNewWork_(workId) {
+  return isNarouWorkId_(workId) ? '' : ORDER_MODE_TOC;
+}
+
+// 目次順に並べ替える。目次に載っていない話（目次が読めなかった場合など）は後ろに、元の順のまま置く。
+function orderEpisodesByToc_(episodes) {
+  return episodes
+    .map((e, i) => ({ e: e, i: i }))
+    .sort((a, b) => {
+      const ha = typeof a.e.toc === 'number', hb = typeof b.e.toc === 'number';
+      if (ha && hb) return (a.e.toc - b.e.toc) || (a.i - b.i);
+      if (ha !== hb) return ha ? -1 : 1;
+      return a.i - b.i;
+    })
+    .map(x => x.e);
+}
+
+function seenFileName_(workId) {
+  return `${SEEN_FILE_PREFIX}${workId}.json`;
+}
+
+// 取得済みの話 ID の一覧（ドキュメントに書いた順）。ファイルが無い・読めなければ null。
+function loadSeenIds_(workId) {
+  try {
+    const f = findFileInFolder(seenFileName_(workId));
+    if (!f) return null;
+    const ids = JSON.parse(f.getBlob().getDataAsString('UTF-8'));
+    return Array.isArray(ids) ? ids.map(String) : null;
+  } catch(e) {
+    Logger.log(`取得済み一覧の読み込みに失敗: ${workId} / ${e}`);
+    return null;
+  }
+}
+
+// 取得済みの話 ID の一覧を保存する。成功したら true。
+function saveSeenIds_(workId, ids) {
+  try {
+    return writeBuffer(ScriptApp.getOAuthToken(), seenFileName_(workId), JSON.stringify(ids)) !== false;
+  } catch(e) {
+    Logger.log(`取得済み一覧の保存に失敗: ${workId} / ${e}`);
+    return false;
+  }
+}
+
+// 番号の並びを「5、118〜120」の形にまとめる（フッターの「今回追記」用）
+function formatEpisodeRanges_(nos) {
+  const out = [];
+  for (let i = 0; i < nos.length; i++) {
+    let j = i;
+    while (j + 1 < nos.length && nos[j + 1] === nos[j] + 1) j++;
+    out.push(i === j ? String(nos[i]) : `${nos[i]}〜${nos[j]}`);
+    i = j;
+  }
+  return out.join('、');
 }
 
 // 章タイトルの整形（改行・タブを空白にして前後を削る。全角スペースなど中の空白はそのまま）
@@ -387,7 +476,9 @@ function prepareFetch(url, startEpisode, endEpisode) {
 
   const catalog = loadWorkCatalog_(targetUrl, workId);
   if (!catalog) return false;
-  const { title, episodes: allEpisodes } = catalog;
+  const title = catalog.title;
+  const orderMode = orderModeForNewWork_(workId);
+  const allEpisodes = orderMode === ORDER_MODE_TOC ? orderEpisodesByToc_(catalog.episodes) : catalog.episodes;
 
   Logger.log(`タイトル: ${title}`);
   Logger.log(`全エピソード数: ${allEpisodes.length}`);
@@ -407,6 +498,10 @@ function prepareFetch(url, startEpisode, endEpisode) {
   }
   const episodes = buildRunEpisodes_(allEpisodes, startIndex, endEx, true);
 
+  // 目次順の作品は、開始話数より前（読み飛ばした話）を取得済みとして一覧を作り直す。
+  //   今回取る話は finishRun で足す（途中で失敗したら、次の続き取得で取り直される）。
+  if (orderMode === ORDER_MODE_TOC) saveSeenIds_(workId, allEpisodes.slice(0, startIndex).map(e => e.id));
+
   if (endEp > 0) {
     Logger.log(`【デバッグ】${startIndex + 1} 〜 ${endEx} 話のみ取得 (${episodes.length} 件)`);
   } else {
@@ -424,6 +519,7 @@ function prepareFetch(url, startEpisode, endEpisode) {
     EPISODES:        JSON.stringify(episodes),
     NEXT_INDEX:      '0',
     PHASE:           PHASE_FETCHING,
+    ORDER_MODE:      orderMode,
   });
 
   Logger.log('取得フェーズ準備完了');
@@ -563,8 +659,12 @@ function prepareContinuation(url) {
 
   const catalog = loadWorkCatalog_(url, workId);
   if (!catalog) return false;
-  const { title, episodes: allEpisodes } = catalog;
+  const title = catalog.title;
+  const tocMode = rec.order === ORDER_MODE_TOC;
+  const allEpisodes = tocMode ? orderEpisodesByToc_(catalog.episodes) : catalog.episodes;
   if (allEpisodes.length === 0) { Logger.log('エピソードが見つかりません。'); return false; }
+
+  if (tocMode) return prepareTocContinuation_(rec, workId, url, title, allEpisodes);
 
   // 起点の決定：末尾エピソードIDが現在の一覧にあればその次から。
   // 無ければ（削除・並び替え等）記録の話数を起点にフォールバック。
@@ -606,6 +706,68 @@ function prepareContinuation(url) {
   return true;
 }
 
+// 目次順の作品の続き取得：目次にあって、まだ取っていない話をすべて取る（目次上の位置の順）。
+//   取得済み一覧が無い・記録の件数より少ない（書き込みに失敗した）ときは、
+//   「最後に取った話（lastEpisodeId）まで」を取得済みとみなして補い、重複して取らないことを優先する。
+function prepareTocContinuation_(rec, workId, url, title, allEpisodes) {
+  let seen = loadSeenIds_(workId);
+  if (!seen || seen.length < (Number(rec.seenCount) || 0)) {
+    const idx = rec.lastEpisodeId ? allEpisodes.findIndex(e => e.id === rec.lastEpisodeId) : -1;
+    const upto = (idx >= 0) ? idx + 1 : Math.min(Number(rec.total) || 0, allEpisodes.length);
+    const merged = (seen || []).slice();
+    const has = {};
+    merged.forEach(id => { has[id] = true; });
+    allEpisodes.slice(0, upto).forEach(e => { if (!has[e.id]) { has[e.id] = true; merged.push(e.id); } });
+    Logger.log(`取得済み一覧が${seen ? '不足' : '見つからない'}ため、最後に取った話までを取得済みとして補いました（${merged.length} 件）。`);
+    seen = merged;
+    saveSeenIds_(workId, seen);
+  }
+  const seenSet = {};
+  seen.forEach(id => { seenSet[id] = true; });
+
+  const indices = [];
+  allEpisodes.forEach((e, i) => { if (!seenSet[e.id]) indices.push(i); });
+  if (indices.length === 0) {
+    Logger.log(`新着なし。現在 ${allEpisodes.length} 話（取得済み ${seen.length} 件）。`);
+    return false;
+  }
+
+  // ドキュメント末尾で続いている章 = 最後に書いた話（一覧の末尾から）が属する章
+  const byId = {};
+  allEpisodes.forEach(e => { byId[e.id] = e; });
+  let current = '';
+  for (let k = seen.length - 1; k >= 0; k--) {
+    const e = byId[seen[k]];
+    if (e && e.chapter) { current = e.chapter; break; }
+  }
+  const episodes = buildRunEpisodesAt_(allEpisodes, indices, current);
+  const nos = episodes.map(e => e.no);
+  const ranges = formatEpisodeRanges_(nos);
+  Logger.log(`続き取得（目次順）: ${ranges} 話 (${episodes.length} 件)`);
+
+  const props = PropertiesService.getScriptProperties();
+  clearRunState(props);
+  props.setProperties({
+    WORK_ID:         workId,
+    TITLE:           title,
+    SOURCE_URL:      url,
+    EPISODE_TOTAL:   String(allEpisodes.length),
+    LAST_EPISODE_ID: allEpisodes[allEpisodes.length - 1].id,
+    EPISODES:        JSON.stringify(episodes),
+    NEXT_INDEX:      '0',
+    PHASE:           PHASE_FETCHING,
+    CONTINUATION:    '1',
+    CONT_FROM:       String(nos[0]),
+    CONT_TO:         String(nos[nos.length - 1]),
+    CONT_RANGES:     ranges,
+    DOC_IDS:         JSON.stringify(rec.docIds || []),
+    CONT_LAST_CURSOR: String(rec.lastCursor || 0),
+    ORDER_MODE:      ORDER_MODE_TOC,
+  });
+  Logger.log('続き取得フェーズ準備完了');
+  return true;
+}
+
 // ==========================================
 // 続き取得の現在地を記録する（ブートストラップ用）
 //   「現在の全話を取得済み」とみなして記録する。記録が無い既存作品に対し、
@@ -641,7 +803,10 @@ function seedResumeRecordAt_(url, existingDocIds, readCount) {
 
   const catalog = loadWorkCatalog_(targetUrl, workId);
   if (!catalog) return null;
-  const { title, episodes: allEpisodes } = catalog;
+  const title = catalog.title;
+  // 既存ドキュメントを紐付ける場合は、そのドキュメントの並び（従来の公開日時順）に合わせて従来どおり
+  const orderMode = docIds.length > 0 ? '' : orderModeForNewWork_(workId);
+  const allEpisodes = orderMode === ORDER_MODE_TOC ? orderEpisodesByToc_(catalog.episodes) : catalog.episodes;
   if (allEpisodes.length === 0) { Logger.log('エピソードが見つかりません: ' + targetUrl); return null; }
 
   const total = (readCount === undefined || readCount === null)
@@ -655,7 +820,7 @@ function seedResumeRecordAt_(url, existingDocIds, readCount) {
     catch(e) { Logger.log('末尾cursorの先取りに失敗（続き取得時にバックフィルします）: ' + e); }
   }
 
-  saveResumeRecord(workId, {
+  const rec = {
     title:         title,
     url:           targetUrl,
     total:         total,
@@ -663,7 +828,14 @@ function seedResumeRecordAt_(url, existingDocIds, readCount) {
     docIds:        docIds,
     lastCursor:    lastCursor,
     updatedAt:     Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm'),
-  });
+  };
+  if (orderMode === ORDER_MODE_TOC) {
+    // 目次順で total 話目までを取得済み（既読）として一覧を作る
+    saveSeenIds_(workId, allEpisodes.slice(0, total).map(e => e.id));
+    rec.order = ORDER_MODE_TOC;
+    rec.seenCount = total;
+  }
+  saveResumeRecord(workId, rec);
   return { workId: workId, title: title, total: total, totalEpisodes: allEpisodes.length };
 }
 
@@ -1595,7 +1767,7 @@ function finishRun(props, workId, docIds, startTime) {
 
   const total = props.getProperty('EPISODE_TOTAL');
   if (workId && total) {
-    saveResumeRecord(workId, {
+    const rec = {
       title:         props.getProperty('TITLE')      || '',
       url:           props.getProperty('SOURCE_URL') || '',
       total:         Number(total),
@@ -1603,7 +1775,20 @@ function finishRun(props, workId, docIds, startTime) {
       docIds:        docIds,
       lastCursor:    parseInt(props.getProperty('BUILD_CURSOR') || '0'),
       updatedAt:     Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm'),
-    });
+    };
+    if (props.getProperty('ORDER_MODE') === ORDER_MODE_TOC) {
+      // 目次順の作品：今回書いた話を取得済み一覧の末尾に足す（ドキュメントに書いた順）
+      const seen = loadSeenIds_(workId) || [];
+      const has = {};
+      seen.forEach(id => { has[id] = true; });
+      JSON.parse(props.getProperty('EPISODES') || '[]').forEach(e => {
+        if (!has[e.id]) { has[e.id] = true; seen.push(String(e.id)); }
+      });
+      if (!saveSeenIds_(workId, seen)) Logger.log('⚠ 取得済み一覧を保存できませんでした（次の続き取得では最後に取った話までを取得済みとみなします）');
+      rec.order = ORDER_MODE_TOC;
+      rec.seenCount = seen.length;
+    }
+    saveResumeRecord(workId, rec);
     Logger.log(`続き取得記録を更新: ${total} 話 / ${docIds.length} 冊`);
     // Web UI のサイズ表示（webGetDocSizes）と次話表示（webGetReadingProgress）がこの作品ぶんだけ
     // 古い値を返さないよう、書き込みが確定したこのタイミングでキャッシュを消す。
@@ -1675,18 +1860,21 @@ function writeFileContent(token, fileId, content) {
 
   if (res.getResponseCode() !== 200) {
     Logger.log(`writeFileContent エラー: ${res.getResponseCode()} / ${res.getContentText()}`);
+    return false;
   }
+  return true;
 }
 
 // 名前指定でバッファを上書き（無ければフォルダ内に新規作成）
+//   上書きに失敗したら false（作成時は例外で知らせる）。戻り値は取得済み一覧の保存（saveSeenIds_）が使う。
 function writeBuffer(token, fileName, content) {
   const f = findFileInFolder(fileName);
   if (f) {
-    writeFileContent(token, f.getId(), content);
-  } else {
-    getTargetFolder().createFile(fileName, content, MimeType.PLAIN_TEXT);
-    Logger.log(`バッファファイル作成: ${fileName}`);
+    return writeFileContent(token, f.getId(), content);
   }
+  getTargetFolder().createFile(fileName, content, MimeType.PLAIN_TEXT);
+  Logger.log(`バッファファイル作成: ${fileName}`);
+  return true;
 }
 
 // ==========================================
@@ -1702,11 +1890,37 @@ function loadWorkCatalog_(url, workId) {
   const topHtml = fetchHtml(url);
   if (!topHtml) return null;
   const nextData = extractNextData(topHtml);
+  const episodes = collectAllEpisodes(topHtml, nextData, workId);
+  // 目次上の位置（toc）を付ける。並びは公開日時順のまま（目次順にするかは呼び出し側が決める）。
+  //   位置は 1 ページ目の目次（全話が載っている）から取る。載っていない話には付けない。
+  const tocOrder = extractKakuyomuTocOrder_(nextData, workId);
+  episodes.forEach(e => { if (tocOrder[e.id] !== undefined) e.toc = tocOrder[e.id]; });
   return {
     nextData: nextData,
     title:    extractTitle(topHtml, nextData, workId),
-    episodes: collectAllEpisodes(topHtml, nextData, workId),
+    episodes: episodes,
   };
+}
+
+// カクヨムの目次（Work の tableOfContentsV2）上の話の位置：話 ID → 0 始まりの位置。読めなければ空。
+function extractKakuyomuTocOrder_(nextData, workId) {
+  const order = {};
+  try {
+    const apollo = nextData && nextData.props && nextData.props.pageProps && nextData.props.pageProps.__APOLLO_STATE__;
+    const work = apollo && apollo['Work:' + workId];
+    const tocKey = work && Object.keys(work).find(k => k.indexOf('tableOfContents') === 0);
+    const toc = tocKey && work[tocKey];
+    if (!Array.isArray(toc)) return order;
+    let pos = 0;
+    toc.forEach(ref => {
+      const group = ref && apollo[ref.__ref];
+      ((group && group.episodeUnions) || []).forEach(e => {
+        const id = e && e.__ref ? String(e.__ref).replace('Episode:', '') : '';
+        if (id && order[id] === undefined) order[id] = pos++;
+      });
+    });
+  } catch(e) { Logger.log('目次の並びの抽出エラー: ' + e); }
+  return order;
 }
 
 // エピソード一覧収集（ページネーション対応）

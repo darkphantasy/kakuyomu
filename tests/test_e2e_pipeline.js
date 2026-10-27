@@ -24,7 +24,8 @@ section('クライアントの蹴り（webKick）で FETCHING → BUILD → 完�
 let threw = null;
 try { g('webKick()'); } catch (e) { threw = String(e); }
 check('実行時エラーが出ない', threw, null);
-check('バッファは掃除され、ドキュメントが1冊できている', [Object.keys(state.files).length, state.createdDocs], [0, 1]);
+check('バッファは掃除され、ドキュメントが1冊できている（取得済み一覧のファイルは残す）',
+  [Object.keys(state.files).filter(n => n.indexOf('__kakuyomu_buf_') === 0).length, state.createdDocs], [0, 1]);
 check('記録が保存される（3話・docIds 1件）', [JSON.parse(props.RESUME_777).total, JSON.parse(props.RESUME_777).docIds.length], [3, 1]);
 check('PHASE=DONE・トリガー削除', [props.PHASE, state.triggers], ['DONE', []]);
 const st2 = g('webGetState()');

@@ -34,7 +34,7 @@ const run = (htmlByUrl, url, startExpr) => {
 
 section('カクヨム: 目次の章を読み、章の見出し（H3）と話の見出し（H4）を入れる');
 // 6 話。目次の並び: 章なしの 6 話目（公開日時は最新） → 第一章（1〜3 話） → 第二章（4〜5 話）。
-// 取得は公開日時順（1〜6 話）なので、章なしの話は第一章の後ろに回る。
+// 新規に取得する作品は目次順なので、章なしの 6 話目が先頭（[001]）になる（test_toc_order.js も参照）。
 const kaku = {};
 registerWork(kaku, '777', 'カクヨム作品', 6, { toc: [
   { chapter: null, eps: [6] },
@@ -43,11 +43,19 @@ registerWork(kaku, '777', 'カクヨム作品', 6, { toc: [
 ] });
 const k = run(kaku, 'https://kakuyomu.jp/works/777');
 check('完了する', k.state.props.PHASE, 'DONE');
-check('見出しは 章 H3 → 話 H4 の順で入る（章なしの 6 話目は見出しを出さず、章の続きも途切れさせない）',
+check('見出しは目次順に 章 H3 → 話 H4（章なしの話は見出しを出さない）',
   headingsOf(k.state).map(h => h.join(' ')),
-  ['HEADING_3 第一章　はじまり', 'HEADING_4 第1話 [001]', 'HEADING_4 第2話 [002]', 'HEADING_4 第3話 [003]',
-   'HEADING_3 第二章　つづき', 'HEADING_4 第4話 [004]', 'HEADING_4 第5話 [005]', 'HEADING_4 第6話 [006]']);
-check('章名は前後の空白・タブを削る（中の全角スペースは残す）', headingsOf(k.state)[4][1], '第二章　つづき');
+  ['HEADING_4 第6話 [001]', 'HEADING_3 第一章　はじまり', 'HEADING_4 第1話 [002]', 'HEADING_4 第2話 [003]', 'HEADING_4 第3話 [004]',
+   'HEADING_3 第二章　つづき', 'HEADING_4 第4話 [005]', 'HEADING_4 第5話 [006]']);
+check('章名は前後の空白・タブを削る（中の全角スペースは残す）', headingsOf(k.state)[5][1], '第二章　つづき');
+
+// 従来どおり公開日時順で取る作品（保存済みの作品）では、章なしの 6 話目が第一章の途中に来ることがある。
+// そのときも章の続きを途切れさせず、同じ章の見出しを二重に出さない。
+const legacyOrder = [1, 2, 6, 3, 4, 5].map(no => ({ id: String(no), title: '第' + no + '話', url: 'u',
+  chapter: no === 6 ? '' : (no <= 3 ? '第一章' : '第二章') }));
+check('公開日時順で章なしの話が章の途中に来ても、見出しは各章 1 回ずつ',
+  k.g('buildRunEpisodes_(' + JSON.stringify(legacyOrder) + ', 0, 6, true)').map(e => e.ch || null),
+  ['第一章', null, null, null, '第二章', null]);
 check('run 状態に章名を持たせるのは見出しを出す話だけ（全話に持たせない）',
   JSON.parse(JSON.stringify(k.g('buildRunEpisodes_([{id:"a",title:"t",url:"u",chapter:"X"},{id:"b",title:"t",url:"u",chapter:"X"}], 0, 2, true)'))).map(e => e.ch || null), ['X', null]);
 
