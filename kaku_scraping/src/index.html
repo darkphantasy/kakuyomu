@@ -90,9 +90,13 @@
       .site-tag {
         display: inline-block; font-size: 10px; font-weight: 400; color: var(--muted);
         border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; margin-right: 5px;
-        vertical-align: 1px;
+        vertical-align: 1px; white-space: nowrap;
       }
-      .docs a { font-size: 12px; margin-right: 6px; white-space: nowrap; }
+      /* 分冊リンクの間には空白を入れて折り返せるようにする（renderTable）。nowrap のリンクを隙間なく並べると、
+         Firefox はリンクの境目でも折り返さず、分冊の多い作品でこの列が広がって「作品」列が潰れていた（2026-11） */
+      .docs a { font-size: 12px; margin-right: 2px; white-space: nowrap; }
+      /* 他の列に押されて作品名が 1〜2 文字幅に潰れないための下限。スマホ幅（ドキュメント列を隠す）では付けない（横にはみ出すため） */
+      @media (min-width: 641px) { td.title-cell { min-width: 10em; } }
       .row-actions { display: flex; gap: 6px; white-space: nowrap; }
       #log { font-size: 12px; color: var(--muted); max-height: 180px; overflow-y: auto; }
       #log div { padding: 3px 0; border-bottom: 1px solid #eef0f3; }
@@ -891,6 +895,7 @@
           var tr = document.createElement('tr');
 
           var tdTitle = document.createElement('td');
+          tdTitle.className = 'title-cell';
           var d1 = document.createElement('div');
           d1.className = 'title-short';
           d1.style.display = 'inline';
@@ -930,6 +935,8 @@
             a.href = 'https://docs.google.com/document/d/' + id;
             a.target = '_blank';
             a.textContent = (i + 1) + '冊目' + (isKnown ? ('（' + Math.round(bytes / 1024) + ' KB）') : '');
+            // リンクの間に空白を挟む（折り返し位置。無いと Firefox は分冊リンク全体を 1 行として扱い、列が広がる）
+            if (tdDocs.firstChild) tdDocs.appendChild(document.createTextNode(' '));
             tdDocs.appendChild(a);
           });
 
