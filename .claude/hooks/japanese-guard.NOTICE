@@ -1,0 +1,6 @@
+claude-code-japanese-guard
+Copyright 2026 Minoru Onda
+
+出典: https://github.com/minorun365/claude-code-japanese-guard （コミット 7e2f090972d7ab136fe60c49fa955e8e329dda92）
+ライセンス: Apache License 2.0（全文は同じフォルダの japanese-guard.LICENSE）
+japanese-guard.py は上記リポジトリの hooks/japanese-guard.py を改変せずにそのまま置いたもの。

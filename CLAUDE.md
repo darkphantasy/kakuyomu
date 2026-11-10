@@ -23,6 +23,8 @@ Google Apps Script (GAS) 製。カクヨムと小説家になろうの小説を�
 - `appsscript.json` … マニフェスト(Docs API 有効化・OAuth スコープ・`webapp` 設定)
 - `Reformat_existing_docs.js` … 独立ツール。既存ドキュメントに現在の書式だけを再適用する。`TARGET_DOC_IDS` は使うたびに書き、使い終わったら空に戻す
 
+`.claude/settings.json` … Claude Code のプロジェクト設定。**日本語ガード**(Stop hook と、「次の一手」の箱を止める PreToolUse hook。`.claude/hooks/japanese-guard.py`。出典 minorun365/claude-code-japanese-guard を改変せず同梱、Apache-2.0。ライセンスと NOTICE は同じフォルダ)を登録している。応答が英語主体だとターンの終わりに日本語での書き直しを差し戻す(1 ターン 1 回まで)。`python3` で動く。`.claude/` は GAS に同期されない。
+
 `kaku_scraping/tools/` は `rootDir`(`src`)の外なので GAS には同期されない。ブラウザ側で使う補助スクリプト置き場。
 
 - `extract_antenna_list.js` … カクヨムの閲覧履歴・未読あり一覧、または小説家になろうのブックマーク一覧のページでブラウザのコンソールに貼り付けて実行し、作品一覧(URL・タイトル・未読話数・全話数・なろうはしおり)を JSON で抽出する(選択登録で使う)。Web UI の「候補から選んで登録」カードにあるブックマークレット(`index.html` の `extractSeedCandidates_()`)と**関数本体が同一**(`test_seed_extract_narou.js` が一致を検査する)。ロジックを変えたら両方直す
