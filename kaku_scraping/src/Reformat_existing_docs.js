@@ -12,6 +12,8 @@
 // ■ 実行する関数
 //   reformatOneDoc()    … 下の TARGET_DOC_IDS の1件目だけ試す（動作確認用）。
 //   reformatAllDocs()   … TARGET_DOC_IDS を順番にすべて適用。
+//   previewLegacyEpisodeHeadings() … 下の「旧形式の話見出し → HEADING_4」の対象件数をログに出すだけ（書き換えない）。
+//   convertLegacyEpisodeHeadings() … TARGET_DOC_IDS の各ドキュメントで、旧形式の話見出し（HEADING_3）を HEADING_4 に揃える。
 // ==========================================
 
 // ここに対象ドキュメントのIDを列挙（URLの /d/ と /edit の間の文字列）
@@ -20,6 +22,7 @@
 const TARGET_DOC_IDS = [
   // '1AbcDEfgHIjkLMnoPQrsTUvwXYz0000000000001',
   // '1AbcDEfgHIjkLMnoPQrsTUvwXYz0000000000002',
+  '10cM5yAQkhxHpK00AQdVMm7PFp8I7hQ0796tLGf1diY4', // 四十歳の元社畜、異世界の宿屋で飯を作る（2）… 話見出しの統一用（2026-11）。済んだら消す
 ];
 
 // 現在の書式設定（kakuyomu_to_docs.gs と同じ値に揃えてあります。変更する場合はここを編集）
@@ -115,4 +118,110 @@ function reformatDoc(docId) {
   }
 
   Logger.log(`整形完了: ${docId}（見出し ${headings.length} 件）`);
+}
+
+// ==========================================
+// 旧形式の話見出し（HEADING_3）を新形式（HEADING_4）に揃える（2026-11）
+//   2026-10 に話の見出しを HEADING_3 → HEADING_4 に変え、章の見出し（HEADING_3）を入れるようにした。
+//   保存済みのドキュメントに続き取得で追記すると、前半が「話 = H3」、後半が「章 = H3・話 = H4」で混在し、
+//   アウトラインの階層が途中で変わる。前半の話見出しを H4 に下げて揃える（テキストは変えない）。
+//
+//   判定（本文テキストは Docs API で読まない）:
+//     ・新形式の部分（最初の H4 以降）の H3 はすべて章 → 触らない
+//     ・最初の H4 より前の H3 は旧形式の話。ただし追記の境目に章の見出しが入っていれば、その直前の 1 件だけは章
+//     ・どちらかは「話の見出しの総数」で決める。総数は Drive のテキストエクスポート（単一の文字列）で
+//       行末が [NNN] の行を数える（次話判定と同じ考え方。段落ごとのオブジェクトは作らない）
+//     ・数が合わなければ何もせずログだけ出す（誤って章を話に変えないため）
+// ==========================================
+function previewLegacyEpisodeHeadings() {
+  if (TARGET_DOC_IDS.length === 0) { Logger.log('TARGET_DOC_IDS が空です。対象ドキュメントIDを記入してください。'); return; }
+  TARGET_DOC_IDS.forEach(id => planLegacyEpisodeHeadings_(id, true));
+}
+
+function convertLegacyEpisodeHeadings() {
+  if (TARGET_DOC_IDS.length === 0) { Logger.log('TARGET_DOC_IDS が空です。対象ドキュメントIDを記入してください。'); return; }
+  TARGET_DOC_IDS.forEach((id, i) => {
+    Logger.log(`[${i + 1}/${TARGET_DOC_IDS.length}] ${id} の話見出しを揃えます...`);
+    try {
+      const plan = planLegacyEpisodeHeadings_(id, true);
+      if (!plan || plan.targets.length === 0) return;
+      const reqs = [];
+      plan.targets.forEach(h => {
+        reqs.push({
+          updateParagraphStyle: {
+            range: { startIndex: h.start, endIndex: h.end },
+            paragraphStyle: { namedStyleType: 'HEADING_4' },
+            fields: 'namedStyleType',
+          }
+        });
+        // 段落スタイルを変えても太字は残るが、念のため見出しの太字（700）を当て直す
+        reqs.push({
+          updateTextStyle: {
+            range: { startIndex: h.start, endIndex: h.end },
+            textStyle: { bold: true, weightedFontFamily: { fontFamily: RF_FONT_FAMILY, weight: 700 } },
+            fields: 'bold,weightedFontFamily',
+          }
+        });
+      });
+      const CHUNK = 500;
+      for (let k = 0; k < reqs.length; k += CHUNK) {
+        Docs.Documents.batchUpdate({ requests: reqs.slice(k, k + CHUNK) }, id);
+      }
+      Logger.log(`変換完了: ${id}（HEADING_3 → HEADING_4: ${plan.targets.length} 件）`);
+    } catch(e) {
+      Logger.log(`エラー（スキップ）: ${id} / ${e}`);
+    }
+  });
+}
+
+// 対象の見出しを決める。数が合わないときは null。
+function planLegacyEpisodeHeadings_(docId, log) {
+  const doc = Docs.Documents.get(docId, {
+    fields: 'body.content(endIndex,paragraph.paragraphStyle.namedStyleType)'
+  });
+  const content = (doc.body && doc.body.content) || [];
+  let end = 1;
+  const heads = []; // H3 / H4 を文書順に
+  for (const el of content) {
+    const start = end;
+    if (typeof el.endIndex === 'number' && el.endIndex > end) end = el.endIndex;
+    if (!el.paragraph || typeof el.endIndex !== 'number') continue;
+    const ns = el.paragraph.paragraphStyle && el.paragraph.paragraphStyle.namedStyleType;
+    if (ns === 'HEADING_3' || ns === 'HEADING_4') heads.push({ level: ns === 'HEADING_3' ? 3 : 4, start: start, end: el.endIndex - 1 });
+  }
+
+  let firstH4 = heads.findIndex(h => h.level === 4);
+  if (firstH4 < 0) firstH4 = heads.length;
+  const legacyH3 = heads.slice(0, firstH4);   // ここは H3 だけ
+  const h4Count  = heads.filter(h => h.level === 4).length;
+
+  const episodeTotal = countEpisodeTagLines_(docId);
+  if (episodeTotal === null) { Logger.log(`本文のエクスポートに失敗したため中止: ${docId}`); return null; }
+  const legacyEpisodes = episodeTotal - h4Count;
+
+  let targets;
+  if (legacyEpisodes === legacyH3.length) {
+    targets = legacyH3;                        // 境目に章の見出しが無い
+  } else if (firstH4 < heads.length && legacyEpisodes === legacyH3.length - 1) {
+    targets = legacyH3.slice(0, -1);           // 境目の H3 は章の見出し
+  } else {
+    Logger.log(`見出しの数が合わないため中止: ${docId}（最初の H4 より前の H3 ${legacyH3.length} 件 / H4 ${h4Count} 件 / [NNN] の行 ${episodeTotal} 件）`);
+    return null;
+  }
+  if (log) {
+    Logger.log(`${docId}: H3 ${heads.length - h4Count} 件・H4 ${h4Count} 件・[NNN] の行 ${episodeTotal} 件 → HEADING_4 にする旧形式の話見出し ${targets.length} 件` +
+      (targets.length < legacyH3.length ? '（境目の章見出し 1 件は残す）' : ''));
+  }
+  return { targets: targets };
+}
+
+// 行末が [NNN] の行（話の見出し）を数える。Drive のテキストエクスポートを単一の文字列で受け取る。
+function countEpisodeTagLines_(docId) {
+  const res = UrlFetchApp.fetch(`https://www.googleapis.com/drive/v3/files/${docId}/export?mimeType=text/plain`, {
+    headers: { 'Authorization': `Bearer ${ScriptApp.getOAuthToken()}` },
+    muteHttpExceptions: true,
+  });
+  if (res.getResponseCode() !== 200) { Logger.log(`エクスポート失敗: HTTP ${res.getResponseCode()}`); return null; }
+  const m = res.getContentText().match(/\[\d{3,}\][ \t\u3000]*\r?$/gm);
+  return m ? m.length : 0;
 }
