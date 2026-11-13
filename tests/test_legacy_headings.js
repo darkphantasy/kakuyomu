@@ -101,4 +101,31 @@ section('数が合わなければ中止');
   check('エクスポート失敗でも書き換えない', state.updates.length, 0);
 }
 
+section('findTocStartForDoc: 先頭の話が目次の何番目か');
+{
+  const logs = [];
+  const docId = '10cM5yAQkhxHpK00AQdVMm7PFp8I7hQ0796tLGf1diY4';
+  const ctx = {
+    Logger: { log: s => logs.push(String(s)) },
+    EPISODE_TAG_RE: /^.*\[(\d{3,})\]\s*$/m,
+    loadResumeRecords_: () => [
+      { workId: '1', rec: { docIds: ['X'] } },
+      { workId: '99', rec: { title: '作品', url: 'https://kakuyomu.jp/works/99', docIds: ['D1', docId] } },
+    ],
+    fetchDocHeadText_: id => id === docId ? '﻿作品（2）\r\n\r\n第174話 社畜（前編） [177]\r\n\r\n本文 [12]\r\n' : null,
+    loadWorkCatalog_: (url, id) => (url === 'https://kakuyomu.jp/works/99' && id === '99') ? { episodes: [
+      // 公開日時順。目次では閑話が 2 番目に挿入されている
+      { id: 'a', title: '第1話', toc: 0 }, { id: 'c', title: '第174話 社畜（前編）', toc: 3 },
+      { id: 'b', title: '第2話', toc: 2 }, { id: 'z', title: '閑話', toc: 1 },
+    ] } : null,
+    orderEpisodesByToc_: eps => eps.slice().sort((x, y) => x.toc - y.toc),
+  };
+  vm.createContext(ctx);
+  vm.runInContext(SRC, ctx);
+  check('目次上の位置（1 始まり）を返す', vm.runInContext('findTocStartForDoc()', ctx), 4);
+  check('ログに開始話数の案内', logs.some(l => /開始話数に 4 を入れて/.test(l)), true);
+  ctx.fetchDocHeadText_ = () => '本文だけ\r\n';
+  check('見出しが無ければ null', vm.runInContext('findTocStartForDoc()', ctx), null);
+}
+
 finish();

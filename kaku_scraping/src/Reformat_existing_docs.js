@@ -14,6 +14,8 @@
 //   reformatAllDocs()   … TARGET_DOC_IDS を順番にすべて適用。
 //   previewLegacyEpisodeHeadings() … 下の「旧形式の話見出し → HEADING_4」の対象件数をログに出すだけ（書き換えない）。
 //   convertLegacyEpisodeHeadings() … TARGET_DOC_IDS の各ドキュメントで、旧形式の話見出し（HEADING_3）を HEADING_4 に揃える。
+//   findTocStartForDoc() … TARGET_DOC_IDS の 1 件目の先頭に残っている話が、作品の目次で何番目かをログに出す
+//                           （目次順で取り直すときの「開始話数」を調べる用。本体 Kakuyomu_to_docs.js / WebApp.js の関数を使う）。
 // ==========================================
 
 // ここに対象ドキュメントのIDを列挙（URLの /d/ と /edit の間の文字列）
@@ -224,4 +226,37 @@ function countEpisodeTagLines_(docId) {
   if (res.getResponseCode() !== 200) { Logger.log(`エクスポート失敗: HTTP ${res.getResponseCode()}`); return null; }
   const m = res.getContentText().match(/\[\d{3,}\][ \t\u3000]*\r?$/gm);
   return m ? m.length : 0;
+}
+
+
+// ==========================================
+// 先頭に残っている話が目次の何番目かを調べる（2026-11）
+//   公開日時順で保存した作品を目次順で取り直す（Web UI の「取得」で開始話数を指定）ときに使う。
+//   目次順の取得では開始話数＝目次上の位置なので、ドキュメントの [NNN]（公開日時順の通し番号）とは一致しない。
+//   ドキュメントの先頭は Range 付きの Drive エクスポート（fetchDocHeadText_）で読む（Docs API で本文は読まない）。
+// ==========================================
+function findTocStartForDoc() {
+  if (TARGET_DOC_IDS.length === 0) { Logger.log('TARGET_DOC_IDS が空です。対象ドキュメントIDを記入してください。'); return null; }
+  const docId = TARGET_DOC_IDS[0];
+  const hit = loadResumeRecords_().find(r => (r.rec.docIds || []).indexOf(docId) >= 0);
+  if (!hit) { Logger.log(`このドキュメントを含む記録が一覧にありません: ${docId}`); return null; }
+
+  const head = fetchDocHeadText_(docId);
+  const m = head && head.match(EPISODE_TAG_RE);
+  if (!m) { Logger.log('ドキュメントの先頭に話の見出し（[NNN]）が見つかりません。'); return null; }
+  const headTitle = m[0].replace(/\s*\[\d{3,}\]\s*$/, '').trim();
+
+  const catalog = loadWorkCatalog_(hit.rec.url, hit.workId);
+  if (!catalog) { Logger.log('目次を取得できませんでした。'); return null; }
+  const eps = orderEpisodesByToc_(catalog.episodes);
+  const norm = t => String(t || '').replace(/\s+/g, ' ').trim();
+  const idx = eps.findIndex(e => norm(e.title) === norm(headTitle));
+
+  Logger.log(`作品: ${hit.rec.title}\nURL: ${hit.rec.url}\n先頭の話: ${headTitle}（${m[1]}）`);
+  if (idx < 0) { Logger.log('目次に同じタイトルの話が見つかりません（作者が改題した可能性）。'); return null; }
+  Logger.log(`→ 目次で ${idx + 1} 番目（全 ${eps.length} 話）。Web UI の「取得」の開始話数に ${idx + 1} を入れてください。`);
+  for (let k = Math.max(0, idx - 2); k <= Math.min(eps.length - 1, idx + 2); k++) {
+    Logger.log(`   ${k + 1}: ${eps[k].title}${k === idx ? '  ← ここから' : ''}`);
+  }
+  return idx + 1;
 }

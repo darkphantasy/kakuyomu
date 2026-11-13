@@ -21,7 +21,7 @@ Google Apps Script (GAS) 製。カクヨムと小説家になろうの小説を�
 - `WebApp.js` … Web アプリのサーバー側。`doGet` と、クライアントから `google.script.run` で呼ばれる `web*` 関数群
 - `index.html` … Web UI 本体(単一ファイル。CSS/JS 込み)。`.claspignore` が `!*.html` を許可しているので同期対象
 - `appsscript.json` … マニフェスト(Docs API 有効化・OAuth スコープ・`webapp` 設定)
-- `Reformat_existing_docs.js` … 独立ツール。既存ドキュメントに現在の書式だけを再適用する。`TARGET_DOC_IDS` は使うたびに書き、使い終わったら空に戻す。`convertLegacyEpisodeHeadings()`(下見は `previewLegacyEpisodeHeadings()`)は、話が HEADING_3 の旧形式部分と新形式の追記部分が混在するドキュメントで、旧形式の話見出しを HEADING_4 に揃える(最初の H4 より前の H3 が対象。境目の章見出しは [NNN] の行数で見分け、数が合わなければ何もしない。`test_legacy_headings.js`)
+- `Reformat_existing_docs.js` … 独立ツール。既存ドキュメントに現在の書式だけを再適用する。`TARGET_DOC_IDS` は使うたびに書き、使い終わったら空に戻す。`convertLegacyEpisodeHeadings()`(下見は `previewLegacyEpisodeHeadings()`)は、話が HEADING_3 の旧形式部分と新形式の追記部分が混在するドキュメントで、旧形式の話見出しを HEADING_4 に揃える(最初の H4 より前の H3 が対象。境目の章見出しは [NNN] の行数で見分け、数が合わなければ何もしない)。`findTocStartForDoc()` は 1 件目のドキュメントの先頭に残っている話が目次の何番目かをログに出す(公開日時順で保存した作品を、Web UI の「取得」で開始話数を指定して目次順に取り直すとき用。目次順の取得では開始話数=目次上の位置で、`[NNN]` とは一致しない)。どちらも `test_legacy_headings.js`
 
 `.claude/settings.json` … Claude Code のプロジェクト設定。**日本語ガード**(Stop hook と、「次の一手」の箱を止める PreToolUse hook。`.claude/hooks/japanese-guard.py`。出典 minorun365/claude-code-japanese-guard を改変せず同梱、Apache-2.0。ライセンスと NOTICE は同じフォルダ)を登録している。応答が英語主体だとターンの終わりに日本語での書き直しを差し戻す(1 ターン 1 回まで)。`python3` で動く。`.claude/` は GAS に同期されない。
 
