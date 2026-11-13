@@ -24,7 +24,6 @@
 const TARGET_DOC_IDS = [
   // '1AbcDEfgHIjkLMnoPQrsTUvwXYz0000000000001',
   // '1AbcDEfgHIjkLMnoPQrsTUvwXYz0000000000002',
-  '10cM5yAQkhxHpK00AQdVMm7PFp8I7hQ0796tLGf1diY4', // 四十歳の元社畜、異世界の宿屋で飯を作る（2）… 話見出しの統一用（2026-11）。済んだら消す
 ];
 
 // 現在の書式設定（kakuyomu_to_docs.gs と同じ値に揃えてあります。変更する場合はここを編集）

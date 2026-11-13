@@ -8,7 +8,9 @@ const path = require('path');
 const vm   = require('vm');
 const { check, section, finish } = require('./harness/check');
 
-const SRC = fs.readFileSync(path.join(__dirname, '..', 'kaku_scraping', 'src', 'Reformat_existing_docs.js'), 'utf8');
+const RAW = fs.readFileSync(path.join(__dirname, '..', 'kaku_scraping', 'src', 'Reformat_existing_docs.js'), 'utf8');
+// TARGET_DOC_IDS は運用時だけ書く一時設定なので、テストでは架空の ID を 1 件差し込む
+const SRC = RAW.replace('const TARGET_DOC_IDS = [', "const TARGET_DOC_IDS = ['TESTDOC',");
 
 // paras: [[style, text], ...]。text は改行抜き。index は UTF-16 で連続に割り当てる。
 function sandbox(paras, opts) {
@@ -104,7 +106,7 @@ section('数が合わなければ中止');
 section('findTocStartForDoc: 先頭の話が目次の何番目か');
 {
   const logs = [];
-  const docId = '10cM5yAQkhxHpK00AQdVMm7PFp8I7hQ0796tLGf1diY4';
+  const docId = 'TESTDOC';
   const ctx = {
     Logger: { log: s => logs.push(String(s)) },
     EPISODE_TAG_RE: /^.*\[(\d{3,})\]\s*$/m,
