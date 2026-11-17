@@ -2182,6 +2182,89 @@ function deleteTrigger() {
 }
 
 // ==========================================
+// 毎日の自動更新（一括続き取得を毎朝 DAILY_UPDATE_HOUR:DAILY_UPDATE_MINUTE（JST）に実行）
+//   GAS の毎日トリガーは指定した分の前後 15 分の幅で発火するため、そのままでは 08:42 ちょうどにならない。
+//   そこで 2 段構えにする:
+//     ① 毎日トリガー（dailyUpdateWake）を実行時刻より前（8 時台の前半。nearMinute(15) → 8:00〜8:30 頃）に置く
+//     ② 起きたら実行時刻までの残り時間で一回きりのトリガー（dailyUpdateRun）を張る（after() の揺れは 1 分前後）
+//     起きた時点で実行時刻を過ぎていたら（毎日トリガーが遅れた）その場で実行する。
+//   実行するのは startContinuationAll（一括続き取得）。取得中なら順番待ちに積むだけでエラーにしない。
+//   トリガーの関数名は continuesFetch と別なので、取得処理の deleteTrigger / ensureTriggerAfter では消えない。
+//   ON/OFF は Web UI の「設定・その他」（webToggleDailyUpdate）か、GAS エディタの
+//   enableDailyUpdate / disableDailyUpdate。ON にするまでは何も動かない。
+// ==========================================
+const DAILY_UPDATE_HOUR   = 8;   // 実行時刻（JST）
+const DAILY_UPDATE_MINUTE = 42;
+const DAILY_WAKE_MINUTE   = 15;  // 毎日トリガーの目安の分（±15 分。必ず実行時刻より前に起きるように）
+const DAILY_WAKE_HANDLER  = 'dailyUpdateWake';
+const DAILY_RUN_HANDLER   = 'dailyUpdateRun';
+const DAILY_RUN_NOW_MS    = 60 * 1000; // 実行時刻までこれ未満なら、トリガーを張らずにその場で実行する
+
+function dailyUpdateTimeLabel_() {
+  return `${String(DAILY_UPDATE_HOUR).padStart(2, '0')}:${String(DAILY_UPDATE_MINUTE).padStart(2, '0')}`;
+}
+
+function deleteTriggersOf_(handler) {
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === handler)
+    .forEach(t => ScriptApp.deleteTrigger(t));
+}
+
+// 毎日の自動更新を ON にする（二重に張らないよう、先に既存のものを消してから張る）
+function enableDailyUpdate() {
+  deleteTriggersOf_(DAILY_WAKE_HANDLER);
+  deleteTriggersOf_(DAILY_RUN_HANDLER);
+  ScriptApp.newTrigger(DAILY_WAKE_HANDLER)
+    .timeBased()
+    .everyDays(1)
+    .atHour(DAILY_UPDATE_HOUR)
+    .nearMinute(DAILY_WAKE_MINUTE)
+    .inTimezone('Asia/Tokyo')
+    .create();
+  PropertiesService.getScriptProperties().setProperty('DAILY_UPDATE', '1');
+  Logger.log(`毎日の自動更新を ON にしました（毎朝 ${dailyUpdateTimeLabel_()} JST に一括続き取得）。`);
+}
+
+// 毎日の自動更新を OFF にする（張りかけの一回きりのトリガーも消す。進行中の取得は止めない）
+function disableDailyUpdate() {
+  deleteTriggersOf_(DAILY_WAKE_HANDLER);
+  deleteTriggersOf_(DAILY_RUN_HANDLER);
+  PropertiesService.getScriptProperties().deleteProperty('DAILY_UPDATE');
+  Logger.log('毎日の自動更新を OFF にしました。');
+}
+
+// 毎日トリガーの入口（8 時台の前半に起きる）
+function dailyUpdateWake() {
+  scheduleDailyRun_(Date.now());
+}
+
+// 今日の実行時刻（JST）までの残りで一回きりのトリガーを張る。過ぎていればその場で実行する。
+//   JST の日付はスクリプトのタイムゾーン設定に頼らず UTC+9 で求める。
+function scheduleDailyRun_(nowMs) {
+  const jst = new Date(nowMs + 9 * 3600 * 1000);
+  const targetMs = Date.UTC(jst.getUTCFullYear(), jst.getUTCMonth(), jst.getUTCDate(),
+                            DAILY_UPDATE_HOUR - 9, DAILY_UPDATE_MINUTE);
+  const delay = targetMs - nowMs;
+  deleteTriggersOf_(DAILY_RUN_HANDLER);
+  if (delay < DAILY_RUN_NOW_MS) {
+    Logger.log('自動更新: 実行時刻を過ぎているため、すぐに実行します。');
+    dailyUpdateRun();
+    return;
+  }
+  ScriptApp.newTrigger(DAILY_RUN_HANDLER).timeBased().after(delay).create();
+  Logger.log(`自動更新: 約 ${Math.round(delay / 60000)} 分後（${dailyUpdateTimeLabel_()} JST）に一括続き取得を始めます。`);
+}
+
+// 実行時刻のトリガーの入口：一括続き取得を始める（取得中なら順番待ちに積むだけ）
+function dailyUpdateRun() {
+  deleteTriggersOf_(DAILY_RUN_HANDLER); // 一回きりのトリガーの後始末
+  PropertiesService.getScriptProperties().setProperty(
+    'DAILY_LAST_RUN', Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm'));
+  Logger.log('自動更新: 一括続き取得を始めます。');
+  startContinuationAll();
+}
+
+// ==========================================
 // 共通ユーティリティ
 // ==========================================
 // 作品ID。カクヨムは数字（kakuyomu.jp/works/<数字>）、小説家になろうは Nコード

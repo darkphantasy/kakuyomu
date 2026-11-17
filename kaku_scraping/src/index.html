@@ -271,9 +271,11 @@
         <h2>設定・その他</h2>
         <div class="btns" style="margin-top:0">
           <button onclick="doToggleShort()">ファイル名短縮: <b id="shortState">…</b></button>
+          <button onclick="doToggleDaily()">毎日の自動更新（<span id="dailyTime">08:42</span>）: <b id="dailyState">…</b></button>
           <button onclick="doClearQueue()">順番待ちをクリア</button>
           <button onclick="refresh()">今すぐ更新</button>
         </div>
+        <div id="dailyLast" style="font-size:12px;color:var(--muted);margin-top:6px"></div>
       </div>
 
       <div class="card">
@@ -825,6 +827,10 @@
         }
         $('queueText').textContent = s.queueCount ? ('順番待ち ' + s.queueCount + ' 件') : '順番待ちなし';
         $('shortState').textContent = s.shortFilename ? 'ON' : 'OFF';
+        var daily = s.daily || {};
+        $('dailyState').textContent = daily.enabled ? 'ON' : 'OFF';
+        if (daily.time) $('dailyTime').textContent = daily.time;
+        $('dailyLast').textContent = daily.lastRun ? ('前回の自動更新: ' + daily.lastRun + ' 開始') : '';
 
         renderTable();
         renderSeedList();
@@ -1264,6 +1270,7 @@
       function doRebuild()    { call('webRebuildIndex', []); }
       function doClearQueue() { call('webClearQueue', []); }
       function doToggleShort(){ call('webToggleShortFilename', []); }
+      function doToggleDaily(){ call('webToggleDailyUpdate', []); }
 
       // タブを離れた時点で実行中だった場合だけ、戻ってきたときに1回だけ確認する。
       //   何も実行していない時にタブを切り替えても何も起きない（「実行中だけポーリング

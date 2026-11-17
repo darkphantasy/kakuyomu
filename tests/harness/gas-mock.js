@@ -15,6 +15,7 @@
 //   docs         … docId → { end }（Docs の body.content 終端 index）
 //   createdDocs  … Docs.Documents.create の呼び出し回数（docId は 'DOC<n>'）
 //   triggers     … 登録中のトリガー（ハンドラ関数名の配列）
+//   triggerLog   … 作ったトリガーの設定 [{handler, after?, everyDays?, atHour?, nearMinute?, tz?}]
 //   batchUpdates … Docs.batchUpdate の記録 [{id, n}]
 //   docRequests  … Docs.batchUpdate のリクエスト全体 [{id, requests}]（見出しレベルなど書式の検査用）
 //   insertedTexts … Docs.batchUpdate の insertText で挿入した文字列（挿入順）
@@ -119,7 +120,7 @@ function registerNarouWork(htmlByUrl, ncode, title, n, epOpts, chapters) {
 function createGasSandbox(opts = {}) {
   const state = {
     props: {}, files: {}, docs: {}, createdDocs: 0, triggers: [],
-    batchUpdates: [], docRequests: [], insertedTexts: [], sheetOps: [], sheetRows: {}, htmlByUrl: opts.htmlByUrl || {}, cache: {}, logs: [],
+    triggerLog: [], batchUpdates: [], docRequests: [], insertedTexts: [], sheetOps: [], sheetRows: {}, htmlByUrl: opts.htmlByUrl || {}, cache: {}, logs: [],
   };
 
   const propsApi = {
@@ -200,8 +201,21 @@ function createGasSandbox(opts = {}) {
     ScriptApp: {
       getScriptId: () => 'SCRIPT', getOAuthToken: () => 'tok',
       getProjectTriggers: () => state.triggers.map(t => ({ getHandlerFunction: () => t })),
-      deleteTrigger: () => { state.triggers = []; },
-      newTrigger: fn => ({ timeBased: () => ({ after: () => ({ create: () => { state.triggers.push(fn); } }) }) }),
+      // 指定したトリガーだけを消す（同じ関数名のものが複数あれば 1 件）
+      deleteTrigger: trig => { const i = state.triggers.indexOf(trig.getHandlerFunction()); if (i >= 0) state.triggers.splice(i, 1); },
+      // after()（一回きり）と everyDays().atHour().nearMinute().inTimezone()（毎日）の両方を受け付け、設定を triggerLog に残す
+      newTrigger: fn => ({ timeBased: () => {
+        const spec = { handler: fn };
+        const b = {
+          after: ms => { spec.after = ms; return b; },
+          everyDays: n => { spec.everyDays = n; return b; },
+          atHour: h => { spec.atHour = h; return b; },
+          nearMinute: m => { spec.nearMinute = m; return b; },
+          inTimezone: tz => { spec.tz = tz; return b; },
+          create: () => { state.triggers.push(fn); state.triggerLog.push(spec); },
+        };
+        return b;
+      } }),
     },
     Utilities: {
       formatDate: () => (opts.now || '2026-09-11 12:00'),

@@ -98,6 +98,8 @@ function webGetState() {
     queueCount:      queue.length,
     lastBatchResult: all.BATCH_RESULT || '', // 直近の一括続き取得の結果（1行）
     shortFilename:   isShortFilenameEnabled_(),
+    // 毎日の自動更新（ON/OFF・実行時刻・前回の開始時刻）。ON/OFF はプロパティで表示する（毎回トリガーを列挙しない）
+    daily: { enabled: all.DAILY_UPDATE === '1', time: dailyUpdateTimeLabel_(), lastRun: all.DAILY_LAST_RUN || '' },
   };
 }
 
@@ -321,6 +323,17 @@ function webClearQueue() {
     ['BATCH_MODE', 'BATCH_KIND', 'BATCH_TOTAL', 'BATCH_FETCHED', 'BATCH_SEEDED'].forEach(k => props.deleteProperty(k));
   }
   return { ok: true, message: `順番待ち ${queue.length} 件を取り消しました（実行中の取得は継続します）。` };
+}
+
+// 毎日の自動更新の ON/OFF（ON にすると、毎朝の実行時刻に一括続き取得が始まる）
+function webToggleDailyUpdate() {
+  const on = PropertiesService.getScriptProperties().getProperty('DAILY_UPDATE') === '1';
+  if (on) {
+    disableDailyUpdate();
+    return { ok: true, message: '毎日の自動更新を OFF にしました（進行中の取得は止めません）。' };
+  }
+  enableDailyUpdate();
+  return { ok: true, message: `毎日の自動更新を ON にしました（毎朝 ${dailyUpdateTimeLabel_()} JST ごろに一括続き取得を始めます）。` };
 }
 
 function webToggleShortFilename() {
