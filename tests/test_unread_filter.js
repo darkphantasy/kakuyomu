@@ -83,5 +83,8 @@ unreadOnlyChecked = false;
 vm.runInContext('renderTable();', sandbox);
 check('OFFに戻すと件数表記も消える', elements.workCount.textContent, '（3 作品）');
 
+console.log('\n■ 画面を開いた時点で「未読のみ表示」が ON（既定）');
+check('チェックボックスに checked 属性がある', /<input type="checkbox" id="unreadOnly"[^>]*\schecked[\s>]/.test(html), true);
+
 console.log(`\n合計: ${pass} 件成功 / ${fail} 件失敗\n`);
 process.exit(fail ? 1 : 0);

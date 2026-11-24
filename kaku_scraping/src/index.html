@@ -174,7 +174,7 @@
           <input type="text" id="filter" placeholder="作品名で絞り込み" oninput="renderTable()">
           <button class="mini" onclick="clearFilter()">クリア</button>
           <label class="checkbox-label">
-            <input type="checkbox" id="unreadOnly" onchange="renderTable()">
+            <input type="checkbox" id="unreadOnly" onchange="renderTable()" checked autocomplete="off">
             未読のみ表示
           </label>
         </div>
