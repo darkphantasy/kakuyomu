@@ -104,6 +104,7 @@ Google Apps Script (GAS) 製。カクヨムと小説家になろうの小説を�
 - **読み込みの高速化(2026-11)**: ① ドキュメントのサイズ・最終更新・ゴミ箱かどうかは、保存先フォルダの一覧を Drive API(`files.list`、`UrlFetchApp` + `ScriptApp.getOAuthToken()`。追加スコープ不要)で **1 回**取ってまとめて知る(`listFolderDocMeta_`。以前は 1 冊ごとに DriveApp で 4 回問い合わせていた)。一覧に無い冊(フォルダの外・一覧の取得失敗)だけ `fileMetaById_` で 1 冊ずつ見る。フォルダ ID は `CacheService`(`target_folder_id`)に覚える。② 覚えている判定は `getAll` で 1 回で読み、書き込みも `putAll`。③ 本文の先頭を読む必要がある冊は全作品ぶんを集めて `fetchDocHeadTexts_` が `UrlFetchApp.fetchAll` で `PROGRESS_FETCH_PARALLEL`(10)冊ずつ並行に読む(相手は Google ドライブなので `FETCH_PARALLEL` の取り決めとは無関係。`fetchAll` が失敗した組は 1 冊ずつ読み直す)。分冊の何冊目まで見るかは前の冊の結果で決まるので、「読む → 進める」を必要な回数繰り返す。④ クライアントは画面を開いた直後、**全作品を 1 回で `cachedOnly` で問い合わせ**(`maybeFetchProgress`)、`pending` の作品だけを `PROGRESS_CHUNK`(10)件ずつ改めて問い合わせる。⑤ 索引シートへのリンクは `webGetState` の `links` に同梱(以前の `webGetLinks` は廃止)。`test_progress2.js` / `test_ui_progress2.js` で検証している。
 - 判定は `fetchDocHeadText_` / `fetchDocHeadTexts_` が Drive export エンドポイントを **HTTP Range 付き**で叩き、先頭 `PROGRESS_SCAN_CHARS`(2 万字)だけを `EPISODE_TAG_RE`(行末アンカー。本文中の `[123]` を拾わない)で探す。Range が無視され 200 が返っても先頭を切り出して使い、ログに残す。認証は既存の `writeFileContent` と同じ `ScriptApp.getOAuthToken()` + `UrlFetchApp`(追加スコープ不要)。
 - キャッシュは docId ごとに 1 件(`progress_<docId>`、TTL `PROGRESS_CACHE_SEC`=6 時間)。値は `{stamp: '<最終更新ms>_<サイズ>', ep}` で、**印が一致したときだけ使い、違えば読み直す**(読み進めて先頭を削除すると最終更新が変わる)。**取得で書き込んだときは `finishRun` が `invalidateProgressCache_` で明示的に消す**。更新から `PROGRESS_FRESH_MS`(5 分)以内の判定結果はキャッシュしない(Drive 側の反映待ちで古い中身が返る窓を固定しないため)。
+- **6 時間を超えて覚える保存ファイル**(2026-11): CacheService は最長 6 時間で消え、朝 09:00 頃・夜 21:00 頃に開く使い方では毎回ほぼ全冊を読み直していたため、判定結果を保存先フォルダの `__kakuyomu_progress.json`(`PROGRESS_STORE_FILE_NAME`。`{docId: [印, 話数 or '', 保存時刻ms]}`)にも残す。**時間では捨てない**(印が一致する限り正しいため。朝の自動更新で追記された作品は `finishRun` の無効化で、読み進めた冊は印の変化で、その冊だけ読み直す)。CacheService に無いときだけ 1 回の問い合わせにつき 1 回ファイルを読み、見つかった判定は CacheService に入れ直す。ファイル ID は Script Property `PROGRESS_STORE_ID`。書き込みは並行する問い合わせで上書きし合わないよう `LockService.getUserLock()`(取得処理の `getScriptLock` とは別)の中で読み直してから足し、ロックが取れなければ見送る(次に読み直すだけ)。`PROGRESS_STORE_KEEP_DAYS`(30 日)より前に保存した項目は書き込みのついでに捨てる(削除したドキュメントのぶんが溜まらないように)。`invalidateProgressCache_` はここからも消す。壊れていれば空として扱い書き直す。`test_progress2.js` で検証している。
 - クライアントは作品ごとの問い合わせ通し番号 `epSeq` を持ち、**同じ作品への問い合わせが重なったら最後に出した方の応答だけを `readingEp` に反映する**(ページ読込時の「最新」が、一括取得後の再問い合わせより遅れて返って上書きするのを防ぐ)。
 - 分冊は古い順に見て、削除済み・見出し無しは飛ばして次へ。全て無ければ `'latest'`。
 - クライアントは `readingEp` を持つ(問い合わせ方は上の④)。
@@ -126,6 +127,7 @@ Google Apps Script (GAS) 製。カクヨムと小説家になろうの小説を�
 - `SHORT_FILENAME` … ファイル名短縮の ON/OFF(`'0'` で OFF。未設定は ON)。
 - `REMOVED_<workId>` … 削除済みリスト `{title,url,total,docIds,removedAt}`(上記)。`resetAll` では消えない。
 - `DAILY_UPDATE` / `DAILY_LAST_RUN` … 毎日の自動更新の ON(`'1'`)と前回の開始時刻(`'yyyy-MM-dd HH:mm'`)。表示用で、実体はトリガー(`dailyUpdateWake` / `dailyUpdateRun`)。`resetAll` では消えない。
+- `PROGRESS_STORE_ID` … 次話の判定結果の保存ファイル(`__kakuyomu_progress.json`)の ID。消えても名前で探し直す。
 
 ## 書式仕様
 

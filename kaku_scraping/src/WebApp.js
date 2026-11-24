@@ -25,7 +25,7 @@ const DOC_SIZE_CACHE_PREFIX = 'docsize_';
 // 次話の判定（読了ぶんを先頭から削除する運用が前提。後述の webGetReadingProgress）
 const PROGRESS_SCAN_CHARS   = 20000;                    // ドキュメント先頭から何字ぶんを見るか
 const PROGRESS_SCAN_BYTES   = PROGRESS_SCAN_CHARS * 3;  // UTF-8 の日本語は1字3バイト
-const PROGRESS_CACHE_SEC    = 21600;                    // CacheService の上限（6時間）
+const PROGRESS_CACHE_SEC    = 21600;                    // CacheService の上限（6時間）。それより長くはファイルに残す（下記）
 const PROGRESS_CACHE_PREFIX = 'progress_';
 const PROGRESS_FRESH_MS     = 5 * 60 * 1000;            // 更新からこの時間内の判定結果はキャッシュしない
 const PROGRESS_LATEST       = 'latest';                 // 「未読なし・最新話まで読了」を表す返り値
@@ -459,16 +459,28 @@ function webGetReadingProgress(workDocIds, cachedOnly) {
   try { cachedRaw = cache.getAll(allIds.map(id => PROGRESS_CACHE_PREFIX + id)) || {}; }
   catch(e) { Logger.log('次話のキャッシュ読み出し失敗: ' + e); }
   const known = {}; // docId -> 話数の文字列 / ''（見出し無し） / PROGRESS_ERROR
+  const toCache = {}; // CacheService に書く（6 時間）
+  const toStore = {}; // 保存ファイルに書く（新しく本文を読んで判定したぶんだけ）
+  let store = null;   // 保存ファイル（CacheService に無いときだけ、1 回の問い合わせにつき 1 回読む）
   const knownOf = id => {
     if (Object.prototype.hasOwnProperty.call(known, id)) return known[id];
     const m = metaOf(id);
+    const stamp = progressStamp_(m);
     const c = parseProgressCache_(cachedRaw[PROGRESS_CACHE_PREFIX + id]);
-    if (c && c.stamp === progressStamp_(m)) known[id] = c.ep;
+    if (c && c.stamp === stamp) {
+      known[id] = c.ep;
+    } else {
+      if (!store) store = loadProgressStore_();
+      const e = store.entries[id];
+      if (e && e[0] === stamp) {
+        known[id] = e[1];
+        toCache[PROGRESS_CACHE_PREFIX + id] = JSON.stringify({ stamp: stamp, ep: e[1] }); // 次の 6 時間はファイルを読まずに済む
+      }
+    }
     return known[id]; // undefined = 本文を読まないと分からない
   };
 
   // ③ 各作品を分冊の頭から進め、本文を読む必要がある冊で止める → まとめて読む → 繰り返す
-  const toCache = {};
   let active = works;
   while (active.length > 0) {
     const need = [];
@@ -501,6 +513,7 @@ function webGetReadingProgress(workDocIds, cachedOnly) {
       // 更新直後（PROGRESS_FRESH_MS 以内）の結果は、Drive 側の反映待ちの可能性があるので覚えない
       if (Date.now() - meta[id].updatedMs > PROGRESS_FRESH_MS) {
         toCache[PROGRESS_CACHE_PREFIX + id] = JSON.stringify({ stamp: progressStamp_(meta[id]), ep: known[id] });
+        toStore[id] = [progressStamp_(meta[id]), known[id], Date.now()];
       }
     });
     active = next;
@@ -510,6 +523,7 @@ function webGetReadingProgress(workDocIds, cachedOnly) {
     try { cache.putAll(toCache, PROGRESS_CACHE_SEC); }
     catch(e) { Logger.log('次話のキャッシュ書き込み失敗: ' + e); }
   }
+  if (Object.keys(toStore).length > 0) updateProgressStore_(toStore, []);
   return { progress, sizes, pending };
 }
 
@@ -591,6 +605,91 @@ function invalidateProgressCache_(docIds) {
   docIds = Array.isArray(docIds) ? docIds : [];
   if (docIds.length === 0) return;
   CacheService.getScriptCache().removeAll(docIds.map(id => PROGRESS_CACHE_PREFIX + id));
+  updateProgressStore_({}, docIds);
+}
+
+// ==========================================
+// 次話の判定結果の保存ファイル（6 時間を超えて覚えておく。2026-11）
+//   CacheService は最長 6 時間で消えるため、朝（09:00 頃）と夜（21:00 頃）に開く使い方では毎回ほぼ全冊の
+//   本文先頭を読み直していた。判定結果は「最終更新_サイズ」の印が一致する限り正しい（読み進めて先頭を
+//   削除した・追記したなら印が変わって読み直す）ので、時間で捨てる必要はない。そこで保存先フォルダの
+//   PROGRESS_STORE_FILE_NAME（JSON。{ docId: [印, 話数 or '', 保存した時刻ms] }）にも残し、CacheService に
+//   無いときはここを見る。見つかったら CacheService にも入れ直す（次の 6 時間はファイルを読まない）。
+//   ・ファイルの ID は Script Property PROGRESS_STORE_ID に覚える（フォルダの検索を毎回しない）
+//   ・書き込みは並行する問い合わせ（画面は小分けに同時に問い合わせる）で上書きし合わないよう、
+//     LockService.getUserLock()（取得処理の getScriptLock とは別）の中で読み直してから足す。
+//     ロックが取れなければ書かない（次に本文を読み直すだけで、結果は正しいまま）
+//   ・PROGRESS_STORE_KEEP_DAYS 日より前に保存したものは書き込みのついでに捨てる（削除したドキュメントの
+//     ぶんが溜まらないように。捨てても次に 1 回読み直すだけ）
+//   ・取得で書き込んだときは finishRun → invalidateProgressCache_ がここからも消す
+// ==========================================
+const PROGRESS_STORE_FILE_NAME = '__kakuyomu_progress.json';
+const PROGRESS_STORE_KEEP_DAYS = 30;
+const PROGRESS_STORE_LOCK_MS   = 5000;
+
+// { file: Drive のファイル or null, entries: {...} }。読めなければ entries は空
+function loadProgressStore_() {
+  let file = null;
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const id = props.getProperty('PROGRESS_STORE_ID');
+    if (id) {
+      try {
+        const f = DriveApp.getFileById(id);
+        if (!f.isTrashed()) file = f;
+      } catch(e) { /* 消されていた → 名前で探す */ }
+    }
+    if (!file) {
+      file = findFileInFolder(PROGRESS_STORE_FILE_NAME);
+      if (file) props.setProperty('PROGRESS_STORE_ID', file.getId());
+    }
+    if (!file) return { file: null, entries: {} };
+    const entries = JSON.parse(file.getBlob().getDataAsString('UTF-8'));
+    return { file: file, entries: (entries && typeof entries === 'object' && !Array.isArray(entries)) ? entries : {} };
+  } catch(e) {
+    Logger.log('次話の保存ファイルの読み込みに失敗: ' + e);
+    return { file: file, entries: {} };
+  }
+}
+
+// 保存ファイルに updates（{ docId: [印, 話数, 時刻] }）を足し、removeIds を消して書き戻す
+//   失敗しても例外は投げない（次話の判定結果そのものは返せるように）
+function updateProgressStore_(updates, removeIds) {
+  let lock;
+  try {
+    lock = LockService.getUserLock();
+    if (!lock.tryLock(PROGRESS_STORE_LOCK_MS)) {
+      Logger.log('次話の保存ファイルを更新できませんでした（ほかの問い合わせが更新中）');
+      return;
+    }
+  } catch(e) {
+    Logger.log('次話の保存ファイルのロックに失敗: ' + e);
+    return;
+  }
+  try {
+    const store = loadProgressStore_();
+    const entries = store.entries;
+    let changed = false;
+    Object.keys(updates).forEach(id => { entries[id] = updates[id]; changed = true; });
+    removeIds.forEach(id => { if (Object.prototype.hasOwnProperty.call(entries, id)) { delete entries[id]; changed = true; } });
+    const limit = Date.now() - PROGRESS_STORE_KEEP_DAYS * 24 * 3600 * 1000;
+    Object.keys(entries).forEach(id => {
+      const e = entries[id];
+      if (!Array.isArray(e) || !(e[2] > limit)) { delete entries[id]; changed = true; }
+    });
+    if (!changed) return;
+    const json = JSON.stringify(entries);
+    if (store.file) {
+      store.file.setContent(json);
+    } else {
+      const f = getTargetFolder().createFile(PROGRESS_STORE_FILE_NAME, json, MimeType.PLAIN_TEXT);
+      PropertiesService.getScriptProperties().setProperty('PROGRESS_STORE_ID', f.getId());
+    }
+  } catch(e) {
+    Logger.log('次話の保存ファイルの書き込みに失敗: ' + e);
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 // ドキュメント本文の「先頭だけ」をプレーンテキストで取る。

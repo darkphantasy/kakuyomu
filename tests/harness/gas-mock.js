@@ -138,6 +138,7 @@ function createGasSandbox(opts = {}) {
       getSize:    () => (state.files[name] || '').length,
       getLastUpdated: () => new Date(),
       getBlob:    () => ({ getDataAsString: () => state.files[name] }),
+      setContent: c => { state.files[name] = c; },
       setTrashed: () => { delete state.files[name]; },
       isTrashed:  () => !(name in state.files),
       moveTo() {},
@@ -256,7 +257,10 @@ function createGasSandbox(opts = {}) {
       },
     },
     MimeType: { PLAIN_TEXT: 'text/plain' },
-    LockService: { getScriptLock: () => ({ waitLock() {}, tryLock: () => true, releaseLock() {} }) },
+    LockService: {
+      getScriptLock: () => ({ waitLock() {}, tryLock: () => true, releaseLock() {} }),
+      getUserLock: () => ({ waitLock() {}, tryLock: () => true, releaseLock() {} }),
+    },
     CacheService: {
       getScriptCache: () => ({
         get: k => (k in state.cache ? state.cache[k] : null),
@@ -264,6 +268,7 @@ function createGasSandbox(opts = {}) {
         remove: k => { delete state.cache[k]; },
         removeAll: ks => { ks.forEach(k => { delete state.cache[k]; }); },
         getAll: ks => { const o = {}; ks.forEach(k => { if (k in state.cache) o[k] = state.cache[k]; }); return o; },
+        putAll: o => { Object.keys(o).forEach(k => { state.cache[k] = o[k]; }); },
       }),
     },
     HtmlService: {},

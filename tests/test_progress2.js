@@ -12,6 +12,18 @@ let listCalls = 0;
 let driveAppOpens = 0;    // DriveApp.getFileById の回数
 let folderListing = null; // null=一覧の問い合わせが失敗する / 配列=フォルダにある docId
 let CacheService_store = new Map();
+// 次話の保存ファイル（保存先フォルダの __kakuyomu_progress.json）と Script Properties
+let storeText = null;      // null=ファイルが無い
+let storeWrites = 0;
+let storeReads = 0;
+let lockFree = true;       // false にすると getUserLock().tryLock が取れない
+let props = {};
+const storeFile = () => ({
+  getId: () => 'STORE', isTrashed: () => false,
+  getBlob: () => ({ getDataAsString: () => { storeReads++; return storeText; } }),
+  setContent: c => { storeWrites++; storeText = c; },
+});
+const storeEntries = () => JSON.parse(storeText || '{}');
 const OLD_UPDATE = Date.now() - 3600 * 1000; // 既定の最終更新（1 時間前＝キャッシュしてよい古さ。呼び出しごとに変わらない）
 const MODIFIED = f => new Date(f.updated != null ? f.updated : OLD_UPDATE);
 const SIZE = f => (f.size != null ? f.size : Buffer.byteLength(f.text, 'utf8'));
@@ -33,6 +45,7 @@ const sandbox = {
   ScriptApp: { getOAuthToken: () => 'tok' },
   DriveApp: {
     getFileById(id) {
+      if (id === 'STORE') { if (storeText == null) throw new Error('not found'); return storeFile(); }
       driveAppOpens++;
       const f = drive[id];
       if (!f) throw new Error('not found');
@@ -45,6 +58,11 @@ const sandbox = {
     },
   },
   getTargetFolderId: () => 'FOLDER',
+  findFileInFolder: name => (name === '__kakuyomu_progress.json' && storeText != null ? storeFile() : null),
+  getTargetFolder: () => ({ createFile: (name, c) => { storeWrites++; storeText = c; return storeFile(); } }),
+  MimeType: { PLAIN_TEXT: 'text/plain' },
+  PropertiesService: { getScriptProperties: () => ({ getProperty: k => (k in props ? props[k] : null), setProperty: (k, v) => { props[k] = v; } }) },
+  LockService: { getUserLock: () => ({ tryLock: () => lockFree, releaseLock() {} }) },
   UrlFetchApp: {
     fetch(url, opts) {
       if (/\/drive\/v3\/files\?/.test(url)) {
@@ -97,6 +115,7 @@ function check(name, actual, expected) {
 }
 function reset() {
   CacheService_store.clear(); exportCalls = 0; drive = {}; fetchAllCalls = []; listCalls = 0; driveAppOpens = 0; folderListing = null;
+  storeText = null; storeWrites = 0; storeReads = 0; lockFree = true; props = {};
 }
 const progressKeys = () => [...CacheService_store.keys()].filter(k => k.indexOf('progress_') === 0);
 
@@ -217,6 +236,70 @@ for (let i = 1; i <= 12; i++) { drive['m' + i] = { text: doc([i]) }; many['w' + 
 folderListing = Object.keys(drive);
 webGetReadingProgress(many);
 check('10 冊 + 2 冊', fetchAllCalls.map(g => g.length), [10, 2]);
+
+
+console.log('\n■ 6 時間を超えて覚える: CacheService が消えても保存ファイルの判定を使う');
+reset();
+drive = { s1: { text: doc([33]) }, s2: { text: doc([]) }, s3: { text: doc([61]) } };
+folderListing = ['s1', 's2', 's3'];
+webGetReadingProgress({ ws: ['s1'], wt: ['s2', 's3'] });
+check('初回は保存ファイルを作り、本文を読んだ 3 冊を書く', [storeWrites, Object.keys(storeEntries()).sort(), props.PROGRESS_STORE_ID], [1, ['s1', 's2', 's3'], 'STORE']);
+CacheService_store.clear(); // 6 時間たって CacheService が消えた
+const readsA = exportCalls;
+const rA = webGetReadingProgress({ ws: ['s1'], wt: ['s2', 's3'] }, true);
+check('cachedOnly でも保存ファイルの判定で全部答えられる（pending なし）', [rA.progress, rA.pending], [{ ws: 33, wt: 61 }, []]);
+check('本文は読まない・保存ファイルは 1 回だけ読み、書き直さない', [exportCalls - readsA, storeReads, storeWrites], [0, 1, 1]);
+check('CacheService に入れ直す（次の 6 時間はファイルを読まない）', progressKeys().length, 3);
+webGetReadingProgress({ ws: ['s1'], wt: ['s2', 's3'] });
+check('2 回目はファイルも読まない', storeReads, 1);
+
+console.log('\n■ 印が変わった冊（読み進めて先頭を削除した）だけ読み直す');
+CacheService_store.clear();
+drive.s1 = { text: doc([34]), updated: Date.now() - 2 * 3600 * 1000 };
+const readsB = exportCalls;
+const rB = webGetReadingProgress({ ws: ['s1'], wt: ['s2', 's3'] }).progress;
+check('新しい話数', [rB.ws, rB.wt], [34, 61]);
+check('読み直したのは s1 の 1 冊だけ', exportCalls - readsB, 1);
+check('保存ファイルも新しい判定に置き換わる', Number(storeEntries().s1[1]), 34);
+
+console.log('\n■ 取得完了時の無効化（invalidateProgressCache_）は保存ファイルからも消す');
+sandbox.invalidateProgressCache_(['s3']);
+check('s3 が消え、ほかは残る', Object.keys(storeEntries()).sort(), ['s1', 's2']);
+const writesC = storeWrites;
+sandbox.invalidateProgressCache_(['zz']);
+check('保存ファイルに無い冊なら書き直さない', storeWrites, writesC);
+
+console.log('\n■ 30 日より前に保存した判定は、書き込みのついでに捨てる');
+storeText = JSON.stringify(Object.assign(storeEntries(), { old1: ['1_1', '5', Date.now() - 31 * 24 * 3600 * 1000] }));
+drive.s4 = { text: doc([2]) };
+folderListing.push('s4');
+webGetReadingProgress({ wu: ['s4'] });
+check('古い判定が消え、新しい判定が入る', Object.keys(storeEntries()).sort(), ['s1', 's2', 's4']);
+
+console.log('\n■ 書き込みのロックが取れなくても、判定結果は返す（保存は見送り）');
+lockFree = false;
+drive.s5 = { text: doc([8]) };
+folderListing.push('s5');
+const writesD = storeWrites;
+check('判定できる', webGetReadingProgress({ wv: ['s5'] }).progress, { wv: 8 });
+check('保存ファイルは書かない', storeWrites, writesD);
+lockFree = true;
+
+console.log('\n■ 保存ファイルが壊れていても、読み直すだけで動く');
+reset();
+drive = { k1: { text: doc([12]) } };
+folderListing = ['k1'];
+storeText = '{壊れた';
+props.PROGRESS_STORE_ID = 'STORE';
+check('判定できる', webGetReadingProgress({ wk: ['k1'] }).progress, { wk: 12 });
+check('正しい内容で書き直される', Object.keys(storeEntries()), ['k1']);
+
+console.log('\n■ 更新直後（5 分以内）の判定は保存ファイルにも残さない');
+reset();
+drive = { n1: { text: doc([3]), updated: Date.now() - 1000 } };
+folderListing = ['n1'];
+webGetReadingProgress({ wn: ['n1'] });
+check('ファイルを作らない', storeText, null);
 
 console.log(`\n合計: ${pass} 件成功 / ${fail} 件失敗\n`);
 process.exit(fail ? 1 : 0);
