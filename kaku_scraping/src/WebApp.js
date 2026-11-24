@@ -100,6 +100,7 @@ function webGetState() {
     shortFilename:   isShortFilenameEnabled_(),
     // 毎日の自動更新（ON/OFF・実行時刻・前回の開始時刻）。ON/OFF はプロパティで表示する（毎回トリガーを列挙しない）
     daily: { enabled: all.DAILY_UPDATE === '1', time: dailyUpdateTimeLabel_(), lastRun: all.DAILY_LAST_RUN || '' },
+    links: indexLinks_(all), // 索引スプレッドシートへのリンク
   };
 }
 
@@ -405,80 +406,178 @@ function invalidateDocSizeCache_(docIds) {
 //   最初の [NNN]」が今読んでいる（または次に読む）話にあたる。1話は概ね2000〜5000字なので、先頭
 //   PROGRESS_SCAN_CHARS 字だけ見れば足りる（全文を読む必要はない）。
 //
-//   引数: { workId: [docId, ...]（古い順） }
-//   返り値: { progress: { workId: 話数 or PROGRESS_LATEST }, sizes: { docId: バイト数 } }
+//   引数: workDocIds = { workId: [docId, ...]（古い順） }
+//         cachedOnly = true なら本文を読みに行かない（覚えている判定だけで答える。画面を開いた直後の
+//                      1 回目用。本文を読む必要がある作品は pending に入れて返し、クライアントが
+//                      小分けにして cachedOnly なしで問い合わせ直す）
+//   返り値: { progress: { workId: 話数 or PROGRESS_LATEST }, sizes: { docId: バイト数 }, pending: [workId] }
 //     - progress は判定できなかった作品をキーごと返さない
 //       （クライアント側は「未取得」として扱い、次回また問い合わせる）。
-//     - sizes は判定の過程で実際に開いたドキュメントぶんだけ（＝docIds の一部のことが多い。
-//       見出しが見つかった時点で走査を打ち切るため）。判定に使ったサイズをそのまま返すので
-//       クライアント側の webGetDocSizes 呼び出しと二重にファイルを開かずに済む。
+//     - sizes は保存先フォルダの一覧で分かったドキュメント（引数の全 docId。フォルダの外のものは
+//       判定の過程で個別に開いたぶんだけ）。クライアント側の webGetDocSizes 呼び出しを省ける。
+//
+//   速くするための工夫（2026-11）:
+//     ① ドキュメントのサイズ・最終更新・ゴミ箱かどうかは、保存先フォルダの一覧を Drive API で
+//        1 回取って全部まとめて知る（listFolderDocMeta_。以前は 1 冊ごとに 4 回問い合わせていた）。
+//        フォルダの外のドキュメント（既存ドキュメントを紐付けた作品）だけは 1 冊ずつ DriveApp で見る。
+//     ② 覚えている判定（CacheService）は getAll で 1 回で読む。
+//     ③ 本文の先頭を読む必要がある冊は、全作品ぶんを集めて UrlFetchApp.fetchAll で並行に読む
+//        （相手は Google ドライブなので、カクヨム・なろうへの取得間隔の取り決めとは無関係）。
+//        分冊の何冊目まで見るかは前の冊の結果で決まるので、「読む → 進める」を必要な回数だけ繰り返す。
 // ==========================================
-function webGetReadingProgress(workDocIds) {
+const PROGRESS_FETCH_PARALLEL = 10;           // 本文の先頭を並行して読む冊数（1 回の fetchAll）
+const PROGRESS_ERROR = '\u0000error';         // 判定の途中で本文の先頭を読めなかった印（内部用）
+const FOLDER_ID_CACHE_KEY = 'target_folder_id';
+
+function webGetReadingProgress(workDocIds, cachedOnly) {
   const progress = {};
   const sizes    = {};
-  if (!workDocIds) return { progress, sizes };
+  const pending  = [];
+  if (!workDocIds) return { progress, sizes, pending };
 
-  const cache = CacheService.getScriptCache();
-  Object.keys(workDocIds).forEach(workId => {
-    const docIds = Array.isArray(workDocIds[workId]) ? workDocIds[workId] : [];
-    if (docIds.length === 0) return; // ドキュメントが無い作品は判定しない
+  const works = Object.keys(workDocIds)
+    .map(workId => ({ workId, docIds: Array.isArray(workDocIds[workId]) ? workDocIds[workId] : [], i: 0 }))
+    .filter(w => w.docIds.length > 0); // ドキュメントが無い作品は判定しない
+  const allIds = [];
+  works.forEach(w => w.docIds.forEach(id => { if (allIds.indexOf(id) < 0) allIds.push(id); }));
+  if (allIds.length === 0) return { progress, sizes, pending };
 
-    let value = PROGRESS_LATEST; // どの分冊にも見出しが残っていなければ「未読なし・最新話まで読了」
-    for (let i = 0; i < docIds.length; i++) {
-      const found = findFirstEpisodeNo_(cache, docIds[i]);
-      if (typeof found.size === 'number') sizes[docIds[i]] = found.size;
-      if (found.status === 'error') return;                   // 判定不能：この作品は返さない
-      if (found.status === 'found') { value = found.episode; break; }
-      // 'skip'（削除済み）と 'none'（見出しが残っていない＝読了）はどちらも次の分冊へ
+  // ① フォルダの一覧（取れなければ空。全冊を個別に見る従来の方法になる）
+  const meta = listFolderDocMeta_();
+  allIds.forEach(id => { if (meta[id]) sizes[id] = meta[id].skip ? 0 : meta[id].size; });
+  const metaOf = id => {
+    if (!meta[id]) {
+      meta[id] = fileMetaById_(id);
+      sizes[id] = meta[id].skip ? 0 : meta[id].size;
     }
-    progress[workId] = value;
-  });
+    return meta[id];
+  };
 
-  return { progress, sizes };
-}
+  // ② 覚えている判定。印（最終更新_サイズ）が一致するものだけ使う
+  const cache  = CacheService.getScriptCache();
+  let cachedRaw = {};
+  try { cachedRaw = cache.getAll(allIds.map(id => PROGRESS_CACHE_PREFIX + id)) || {}; }
+  catch(e) { Logger.log('次話のキャッシュ読み出し失敗: ' + e); }
+  const known = {}; // docId -> 話数の文字列 / ''（見出し無し） / PROGRESS_ERROR
+  const knownOf = id => {
+    if (Object.prototype.hasOwnProperty.call(known, id)) return known[id];
+    const m = metaOf(id);
+    const c = parseProgressCache_(cachedRaw[PROGRESS_CACHE_PREFIX + id]);
+    if (c && c.stamp === progressStamp_(m)) known[id] = c.ep;
+    return known[id]; // undefined = 本文を読まないと分からない
+  };
 
-// 1つのドキュメントについて、先頭に残っている最初の話数を返す。
-//   { status: 'found', episode, size } / 'none'（見出し無し） / 'skip'（削除済み） / 'error'
-//   size は 'error' 以外なら必ず入る（'skip' は削除済み・アクセス不可の意味で 0）。
-//
-//   キャッシュは docId ごとに1件で、値に「更新日時_サイズ」の印を持たせ、印が変わっていれば
-//   走査し直す（読み進めて先頭を削除すると更新日時が変わる）。サイズだけを印にしていた頃は、
-//   Google ドキュメントの Drive 上のサイズが書き込み直後に反映されないことがあり、全話読了時に
-//   覚えた「見出し無し」が追記後も返って「最新」と誤表示された。取得で書き込んだときは
-//   印に頼らず finishRun が invalidateProgressCache_ で明示的に消す。
-//   更新直後（PROGRESS_FRESH_MS 以内）の結果は、Drive 側の反映待ちの可能性があるので覚えない。
-function findFirstEpisodeNo_(cache, docId) {
-  let size, updatedMs;
-  try {
-    const f = DriveApp.getFileById(docId);
-    if (f.isTrashed()) return { status: 'skip', size: 0 };
-    size = f.getSize();
-    updatedMs = f.getLastUpdated().getTime();
-  } catch(e) {
-    return { status: 'skip', size: 0 }; // 削除済み・アクセス不可
+  // ③ 各作品を分冊の頭から進め、本文を読む必要がある冊で止める → まとめて読む → 繰り返す
+  const toCache = {};
+  let active = works;
+  while (active.length > 0) {
+    const need = [];
+    const next = [];
+    active.forEach(w => {
+      for (; w.i < w.docIds.length; w.i++) {
+        const id = w.docIds[w.i];
+        if (metaOf(id).skip) continue;                  // 削除済み・アクセス不可は次の分冊へ
+        const k = knownOf(id);
+        if (k === undefined) {
+          if (cachedOnly) { pending.push(w.workId); return; }
+          if (need.indexOf(id) < 0) need.push(id);
+          next.push(w);
+          return;
+        }
+        if (k === PROGRESS_ERROR) return;               // 判定不能：この作品は返さない
+        if (k !== '') { progress[w.workId] = Number(k); return; }
+        // ''（見出しが残っていない＝読了）は次の分冊へ
+      }
+      progress[w.workId] = PROGRESS_LATEST;             // どの分冊にも見出しが残っていない
+    });
+    if (need.length === 0) break;
+
+    const texts = fetchDocHeadTexts_(need);
+    need.forEach(id => {
+      const head = texts[id];
+      if (head == null) { known[id] = PROGRESS_ERROR; return; }
+      const m = head.match(EPISODE_TAG_RE);
+      known[id] = m ? m[1] : '';
+      // 更新直後（PROGRESS_FRESH_MS 以内）の結果は、Drive 側の反映待ちの可能性があるので覚えない
+      if (Date.now() - meta[id].updatedMs > PROGRESS_FRESH_MS) {
+        toCache[PROGRESS_CACHE_PREFIX + id] = JSON.stringify({ stamp: progressStamp_(meta[id]), ep: known[id] });
+      }
+    });
+    active = next;
   }
 
-  const key   = PROGRESS_CACHE_PREFIX + docId;
-  const stamp = `${updatedMs}_${size}`;
-  const cached = parseProgressCache_(cache.get(key));
-  if (cached && cached.stamp === stamp) {
-    return (cached.ep === '')
-      ? { status: 'none', size: size }
-      : { status: 'found', episode: Number(cached.ep), size: size };
-  }
-
-  const head = fetchDocHeadText_(docId);
-  if (head == null) return { status: 'error', size: size };
-
-  const m = head.match(EPISODE_TAG_RE);
-  if (Date.now() - updatedMs > PROGRESS_FRESH_MS) {
-    try { cache.put(key, JSON.stringify({ stamp: stamp, ep: m ? m[1] : '' }), PROGRESS_CACHE_SEC); }
+  if (Object.keys(toCache).length > 0) {
+    try { cache.putAll(toCache, PROGRESS_CACHE_SEC); }
     catch(e) { Logger.log('次話のキャッシュ書き込み失敗: ' + e); }
   }
+  return { progress, sizes, pending };
+}
 
-  return m
-    ? { status: 'found', episode: Number(m[1]), size: size }
-    : { status: 'none', size: size };
+// 次話の判定結果を覚えておくときの印。読み進めて先頭を削除すると最終更新が変わるので、
+//   印が変わっていれば読み直す。サイズだけを印にしていた頃は、Google ドキュメントの Drive 上の
+//   サイズが書き込み直後に反映されないことがあり、全話読了時に覚えた「見出し無し」が追記後も
+//   返って「最新」と誤表示された。取得で書き込んだときは印に頼らず finishRun が
+//   invalidateProgressCache_ で明示的に消す。
+function progressStamp_(m) {
+  return `${m.updatedMs}_${m.size}`;
+}
+
+// 保存先フォルダの Google ドキュメントのサイズ・最終更新・ゴミ箱かどうかを、Drive API の一覧で
+//   まとめて取る（1 冊ずつ DriveApp で開くと 1 冊あたり 4 回の問い合わせになるため）。
+//   返り値: { docId: { size, updatedMs } | { skip: true }（ゴミ箱） }。失敗したら {}（呼び出し側は
+//   個別に開く従来の方法で続ける）。サイズが入っていないファイルは載せない（同じく個別に開く）。
+function listFolderDocMeta_() {
+  const meta = {};
+  try {
+    const cache = CacheService.getScriptCache();
+    let folderId = cache.get(FOLDER_ID_CACHE_KEY);
+    if (!folderId) {
+      folderId = getTargetFolderId();
+      cache.put(FOLDER_ID_CACHE_KEY, folderId, PROGRESS_CACHE_SEC);
+    }
+    const q = `'${folderId}' in parents and mimeType='application/vnd.google-apps.document'`;
+    let pageToken = '';
+    do {
+      const url = 'https://www.googleapis.com/drive/v3/files'
+        + '?q=' + encodeURIComponent(q)
+        + '&fields=' + encodeURIComponent('nextPageToken,files(id,size,quotaBytesUsed,modifiedTime,trashed)')
+        + '&pageSize=1000'
+        + (pageToken ? '&pageToken=' + encodeURIComponent(pageToken) : '');
+      const res = UrlFetchApp.fetch(url, {
+        headers: { 'Authorization': `Bearer ${ScriptApp.getOAuthToken()}` },
+        muteHttpExceptions: true,
+      });
+      if (res.getResponseCode() !== 200) {
+        Logger.log(`フォルダの一覧の取得に失敗: HTTP ${res.getResponseCode()}`);
+        return {};
+      }
+      const body = JSON.parse(res.getContentText());
+      (body.files || []).forEach(f => {
+        if (f.trashed) { meta[f.id] = { skip: true }; return; }
+        const size = (f.size != null) ? Number(f.size) : (f.quotaBytesUsed != null ? Number(f.quotaBytesUsed) : NaN);
+        const updatedMs = Date.parse(f.modifiedTime);
+        if (isNaN(size) || isNaN(updatedMs)) return;
+        meta[f.id] = { size, updatedMs };
+      });
+      pageToken = body.nextPageToken || '';
+    } while (pageToken);
+  } catch(e) {
+    Logger.log('フォルダの一覧の取得に失敗: ' + e);
+    return {};
+  }
+  return meta;
+}
+
+// フォルダの一覧に無いドキュメント（フォルダの外にあるもの等）を 1 冊だけ DriveApp で見る。
+//   削除済み・アクセス不可は { skip: true }。
+function fileMetaById_(docId) {
+  try {
+    const f = DriveApp.getFileById(docId);
+    if (f.isTrashed()) return { skip: true };
+    return { size: f.getSize(), updatedMs: f.getLastUpdated().getTime() };
+  } catch(e) {
+    return { skip: true };
+  }
 }
 
 function parseProgressCache_(raw) {
@@ -502,21 +601,48 @@ function invalidateProgressCache_(docIds) {
 //   ※ Docs API で本文を含む取得をすると要素ごとにオブジェクトが大量生成されて
 //     OOM するため、そちらの経路は使わない（テキストは単一の文字列で受け取る）。
 function fetchDocHeadText_(docId) {
-  const url = `https://www.googleapis.com/drive/v3/files/${docId}/export?mimeType=text/plain`;
+  const req = docHeadRequest_(docId);
   let res;
   try {
-    res = UrlFetchApp.fetch(url, {
-      headers: {
-        'Authorization': `Bearer ${ScriptApp.getOAuthToken()}`,
-        'Range':         `bytes=0-${PROGRESS_SCAN_BYTES - 1}`,
-      },
-      muteHttpExceptions: true,
-    });
+    res = UrlFetchApp.fetch(req.url, { headers: req.headers, muteHttpExceptions: true });
   } catch(e) {
     Logger.log(`本文先頭の取得に失敗: ${docId} / ${e}`);
     return null;
   }
+  return docHeadTextFromResponse_(docId, res);
+}
 
+// 複数のドキュメントの先頭を、PROGRESS_FETCH_PARALLEL 冊ずつ並行に読む。
+//   返り値: { docId: テキスト | null（読めなかった） }。fetchAll がまとめて失敗したら、その組だけ 1 冊ずつ読む。
+function fetchDocHeadTexts_(docIds) {
+  const out = {};
+  for (let i = 0; i < docIds.length; i += PROGRESS_FETCH_PARALLEL) {
+    const group = docIds.slice(i, i + PROGRESS_FETCH_PARALLEL);
+    let responses = null;
+    try {
+      responses = UrlFetchApp.fetchAll(group.map(docHeadRequest_));
+    } catch(e) {
+      Logger.log('本文先頭の並行取得に失敗。1 冊ずつ読み直します: ' + e);
+    }
+    group.forEach((id, j) => {
+      out[id] = responses ? docHeadTextFromResponse_(id, responses[j]) : fetchDocHeadText_(id);
+    });
+  }
+  return out;
+}
+
+function docHeadRequest_(docId) {
+  return {
+    url: `https://www.googleapis.com/drive/v3/files/${docId}/export?mimeType=text/plain`,
+    headers: {
+      'Authorization': `Bearer ${ScriptApp.getOAuthToken()}`,
+      'Range':         `bytes=0-${PROGRESS_SCAN_BYTES - 1}`,
+    },
+    muteHttpExceptions: true,
+  };
+}
+
+function docHeadTextFromResponse_(docId, res) {
   const code = res.getResponseCode();
   if (code !== 200 && code !== 206) {
     Logger.log(`本文先頭の取得に失敗: HTTP ${code} (${docId})`);
@@ -532,11 +658,11 @@ function fetchDocHeadText_(docId) {
   return (text.length > PROGRESS_SCAN_CHARS) ? text.substring(0, PROGRESS_SCAN_CHARS) : text;
 }
 
-// 索引スプレッドシートへのリンク（画面から開けるように）
-function webGetLinks() {
-  const props = PropertiesService.getScriptProperties();
+// 索引スプレッドシートへのリンク（画面から開けるように）。webGetState が一緒に返す
+//   （以前は画面を開いたときに別の問い合わせ webGetLinks で取っていた。往復を 1 回減らすため統合）
+function indexLinks_(all) {
   const mk = (id) => id ? `https://docs.google.com/spreadsheets/d/${id}` : '';
   return {
-    indexUrl: mk(props.getProperty('INDEX_SHEET_ID')),
+    indexUrl: mk(all.INDEX_SHEET_ID),
   };
 }

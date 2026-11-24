@@ -341,7 +341,7 @@
       var readingEp = {};         // workId -> 話数 or 'latest'（未読なし＝最新話まで読了）
       var pendingEpIds = {};      // workId -> true
       var epSeq = {};             // workId -> 最後に出した次話問い合わせの通し番号（古い応答を捨てる用）
-      var PROGRESS_CHUNK = 5;     // 1回の問い合わせで見る作品数（未キャッシュだと1件ずつ読むため）
+      var PROGRESS_CHUNK = 10;    // 本文の先頭を読みに行く問い合わせ 1 回あたりの作品数（サーバーは並行に読む）
 
       // 候補から選んで登録（閲覧履歴・未読あり一覧の貼り付けから）
       //   workId -> { url, title, unread, total, checked }。複数回貼り付けても workId で重複しない。
@@ -580,7 +580,9 @@
         if (need.length > 0) fetchSizes(need);
       }
 
-      // まだ次話を知らない作品だけを問い合わせる（主にページ読込時）
+      // まだ次話を知らない作品だけを問い合わせる（主にページ読込時）。
+      //   まず全作品を 1 回で「サーバーが覚えている判定だけ」で問い合わせ（cachedOnly。本文を読まないので速い）、
+      //   本文を読み直す必要がある作品（応答の pending）だけを、PROGRESS_CHUNK 件ずつ改めて問い合わせる。
       function maybeFetchProgress(works) {
         var need = [];
         works.forEach(function (w) {
@@ -588,7 +590,7 @@
           if (Object.prototype.hasOwnProperty.call(readingEp, w.workId)) return;
           need.push(w);
         });
-        fetchProgress(need);
+        fetchProgressChunk(need, true);
       }
 
       // 前回ポーリング時から updatedAt が変わった作品だけ、サイズと次話を取り直す
@@ -637,11 +639,13 @@
         // 未キャッシュの作品はドキュメントの先頭を実際に読みに行くので、1回の呼び出しが
         // 長くなりすぎないよう小分けにする（結果も届いたぶんから順に描画される）
         for (var i = 0; i < works.length; i += PROGRESS_CHUNK) {
-          fetchProgressChunk(works.slice(i, i + PROGRESS_CHUNK));
+          fetchProgressChunk(works.slice(i, i + PROGRESS_CHUNK), false);
         }
       }
 
-      function fetchProgressChunk(works) {
+      // cachedOnly: true ならサーバーは本文を読まずに答え、読む必要がある作品を pending で返す
+      //   （pending の作品はここから fetchProgress で小分けに問い合わせ直す）
+      function fetchProgressChunk(works, cachedOnly) {
         if (works.length === 0) return;
         var map = {};
         var ids = [];
@@ -665,25 +669,34 @@
                 if (latest(id) && Object.prototype.hasOwnProperty.call(res.progress, id)) readingEp[id] = res.progress[id];
               });
             }
-            // 判定の過程で開いたドキュメントのサイズも一緒に反映する（二重に開かない）
+            // 判定の過程で分かったドキュメントのサイズも一緒に反映する（二重に開かない）
             if (res && res.sizes) {
               Object.keys(res.sizes).forEach(function (docId) { docSizes[docId] = res.sizes[docId]; });
             }
-            // それでもサイズが不明な docId（見出しが早めに見つかり走査対象外だった巻）だけ、
+            // 本文を読み直す必要がある作品は、小分けにして問い合わせ直す（サイズもそちらで返る）
+            var again = [];
+            if (cachedOnly && res && res.pending) {
+              works.forEach(function (w) {
+                if (res.pending.indexOf(w.workId) >= 0 && latest(w.workId)) again.push(w);
+              });
+            }
+            // それでもサイズが不明な docId（保存先フォルダの外にあり、判定で開かなかった巻）だけ、
             // 改めて webGetDocSizes に問い合わせる
             var remain = [];
             works.forEach(function (w) {
+              if (again.indexOf(w) >= 0) return;
               w.docIds.forEach(function (id) {
                 if (!Object.prototype.hasOwnProperty.call(docSizes, id) && remain.indexOf(id) < 0) remain.push(id);
               });
             });
             if (remain.length > 0) fetchSizes(remain);
+            if (again.length > 0) fetchProgress(again);
             renderTable();
           })
           .withFailureHandler(function () {
             ids.forEach(function (id) { if (latest(id)) delete pendingEpIds[id]; }); // 次回また試す
           })
-          .webGetReadingProgress(map);
+          .webGetReadingProgress(map, !!cachedOnly);
       }
 
       // 一覧に出す次話の表示（未読なし＝最新話まで読了なら「最新」。未取得のうちは「…」）
@@ -796,8 +809,15 @@
       //   （開いた時点の値は「前回の結果」なので繰り返し出さない）
       var seenBatchResult = null;
 
+      var renderedIndexUrl = null; // 索引シートへのリンク（変わったときだけ描き直す）
+
       function render(s) {
         lastState = s;
+        var links = s.links || {};
+        if (links.indexUrl !== renderedIndexUrl) {
+          renderedIndexUrl = links.indexUrl;
+          renderLinks(links);
+        }
         refreshChangedWorks(s.works);  // 完了した（updatedAtが変わった）作品を取り直す
         maybeFetchProgress(s.works);   // 次話を知らない作品を先に問い合わせる（サイズも一緒に返る）
         maybeFetchSizes(s.works);      // 次話の問い合わせでカバーされない docId だけ別途取りに行く
@@ -1304,7 +1324,6 @@
         if (bmUrl) bmUrl.value = bookmarklet;          // 手動でブックマークを作る用（貼り付け元）
 
         refresh(); // 応答時に scheduleNextRefresh が呼ばれ、以降は自走する
-        google.script.run.withSuccessHandler(renderLinks).webGetLinks();
       });
     </script>
   </body>

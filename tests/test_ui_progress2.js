@@ -7,13 +7,14 @@ const script = html.match(/<script>([\s\S]*)<\/script>/)[1];
 
 let sizeCalls = [];      // webGetDocSizes に渡された ids の履歴
 let progressCalls = [];  // webGetReadingProgress に渡された map の履歴
+let progressModes = [];  // 同・第 2 引数 cachedOnly の履歴
 let handlers = null;
 
 const runner = {
   withSuccessHandler(f) { handlers.ok = f; return runner; },
   withFailureHandler(f) { handlers.ng = f; return runner; },
   webGetDocSizes(ids) { sizeCalls.push(ids); return runner; },
-  webGetReadingProgress(map) { progressCalls.push(map); return runner; },
+  webGetReadingProgress(map, cachedOnly) { progressCalls.push(map); progressModes.push(cachedOnly); return runner; },
   webGetState() { return runner; },
   webGetLinks() { return runner; },
 };
@@ -94,6 +95,37 @@ check('新しい問い合わせの結果が入る', state('readingEp').w9, 12);
 staleReq.ok({ progress: { w9: 'latest' }, sizes: {} });
 check('遅れて返った古い問い合わせの「最新」では上書きされない', state('readingEp').w9, 12);
 check('問い合わせ中フラグは新しい方の応答で外れている', 'w9' in state('pendingEpIds'), false);
+
+
+console.log('\n■ 画面を開いた直後: まず全作品を 1 回で（覚えている判定だけ）、本文を読む作品だけ小分けに');
+sizeCalls = []; progressCalls = []; progressModes = [];
+setVar('readingEp', {}); setVar('pendingEpIds', {}); setVar('docSizes', {}); setVar('pendingSizeIds', {});
+setVar('knownUpdatedAt', {}); setVar('epSeq', {});
+const many = [];
+for (let i = 1; i <= 13; i++) many.push(mkWork('m' + i, 'x', ['dm' + i]));
+call('render', { works: many, running: { active: false }, queueCount: 0, shortFilename: true });
+check('問い合わせは 1 回・全 13 作品・cachedOnly', [progressCalls.length, Object.keys(progressCalls[0]).length, progressModes[0]], [1, 13, true]);
+check('サイズの別問い合わせは出ない', sizeCalls.length, 0);
+const allSizes = {};
+many.forEach(w => { allSizes[w.docIds[0]] = 100; });
+const pendingIds = many.slice(1).map(w => w.workId); // m1 だけ覚えていた
+handlers.ok({ progress: { m1: 'latest' }, sizes: allSizes, pending: pendingIds });
+check('覚えていた作品は即反映', state('readingEp').m1, 'latest');
+check('残り 12 作品を 10 件ずつ・cachedOnly なしで問い合わせ直す',
+  [progressCalls.slice(1).map(m => Object.keys(m).length), progressModes.slice(1)], [[10, 2], [false, false]]);
+check('問い合わせ直す作品は問い合わせ中のまま', 'm2' in state('pendingEpIds') && 'm13' in state('pendingEpIds'), true);
+check('サイズは応答で全部分かったので、別途問い合わせない', sizeCalls.length, 0);
+handlers.ok({ progress: { m12: 5, m13: 9 }, sizes: {}, pending: [] });
+check('2 回目の応答で反映', [state('readingEp').m12, state('readingEp').m13], [5, 9]);
+check('cachedOnly なしの応答では問い合わせ直さない', progressCalls.length, 3);
+
+console.log('\n■ 索引シートへのリンクは状態の応答に同梱（別の問い合わせをしない・変わったときだけ描き直す）');
+check('webGetLinks を呼ばない', /\.webGetLinks\(/.test(html), false);
+vm.runInContext('__links = []; renderLinks = function (l) { __links.push(l.indexUrl); };', sandbox);
+const st = { works: [], running: { active: false }, queueCount: 0, shortFilename: true, links: { indexUrl: 'https://example.invalid/s' } };
+call('render', st);
+call('render', st);
+check('1 回だけ描く', state('__links'), ['https://example.invalid/s']);
 
 console.log('\n■ 取得操作を実行している間だけポーリングする');
 sizeCalls = []; progressCalls = [];

@@ -100,17 +100,18 @@ Google Apps Script (GAS) 製。カクヨムと小説家になろうの小説を�
 ### 次話表示
 
 - 定義: ユーザーは読了分を先頭から削除する運用なので、**先頭に残っている最初の `[NNN]`** が今読んでいる(または次に読む)話。見出しが 1 つも残っていなければ `'latest'`(画面上「最新」= 未読なし)。
-- `webGetReadingProgress({workId: [docId,...]})` → `{progress: {workId: 話数|'latest'}, sizes: {docId: バイト数}}`。判定できなかった作品は `progress` にキーを入れない(クライアントは未取得扱いで次回再試行)。`sizes` は判定の過程で開いたドキュメントぶんだけ(見つかった時点で走査を打ち切るため、その後ろの分冊は含まれない)。
-- 判定は `fetchDocHeadText_` が Drive export エンドポイントを **HTTP Range 付き**で叩き、先頭 `PROGRESS_SCAN_CHARS`(2 万字)だけを `EPISODE_TAG_RE`(行末アンカー。本文中の `[123]` を拾わない)で探す。Range が無視され 200 が返っても先頭を切り出して使い、ログに残す。認証は既存の `writeFileContent` と同じ `ScriptApp.getOAuthToken()` + `UrlFetchApp`(追加スコープ不要)。
+- `webGetReadingProgress({workId: [docId,...]}, cachedOnly?)` → `{progress: {workId: 話数|'latest'}, sizes: {docId: バイト数}, pending: [workId]}`。判定できなかった作品は `progress` にキーを入れない(クライアントは未取得扱いで次回再試行)。`sizes` は保存先フォルダの一覧で分かった全冊ぶん(フォルダの外のドキュメントは判定の過程で開いたぶんだけ)。`cachedOnly` なら本文を読まず、覚えている判定だけで答えて、本文を読む必要がある作品を `pending` に入れる。
+- **読み込みの高速化(2026-11)**: ① ドキュメントのサイズ・最終更新・ゴミ箱かどうかは、保存先フォルダの一覧を Drive API(`files.list`、`UrlFetchApp` + `ScriptApp.getOAuthToken()`。追加スコープ不要)で **1 回**取ってまとめて知る(`listFolderDocMeta_`。以前は 1 冊ごとに DriveApp で 4 回問い合わせていた)。一覧に無い冊(フォルダの外・一覧の取得失敗)だけ `fileMetaById_` で 1 冊ずつ見る。フォルダ ID は `CacheService`(`target_folder_id`)に覚える。② 覚えている判定は `getAll` で 1 回で読み、書き込みも `putAll`。③ 本文の先頭を読む必要がある冊は全作品ぶんを集めて `fetchDocHeadTexts_` が `UrlFetchApp.fetchAll` で `PROGRESS_FETCH_PARALLEL`(10)冊ずつ並行に読む(相手は Google ドライブなので `FETCH_PARALLEL` の取り決めとは無関係。`fetchAll` が失敗した組は 1 冊ずつ読み直す)。分冊の何冊目まで見るかは前の冊の結果で決まるので、「読む → 進める」を必要な回数繰り返す。④ クライアントは画面を開いた直後、**全作品を 1 回で `cachedOnly` で問い合わせ**(`maybeFetchProgress`)、`pending` の作品だけを `PROGRESS_CHUNK`(10)件ずつ改めて問い合わせる。⑤ 索引シートへのリンクは `webGetState` の `links` に同梱(以前の `webGetLinks` は廃止)。`test_progress2.js` / `test_ui_progress2.js` で検証している。
+- 判定は `fetchDocHeadText_` / `fetchDocHeadTexts_` が Drive export エンドポイントを **HTTP Range 付き**で叩き、先頭 `PROGRESS_SCAN_CHARS`(2 万字)だけを `EPISODE_TAG_RE`(行末アンカー。本文中の `[123]` を拾わない)で探す。Range が無視され 200 が返っても先頭を切り出して使い、ログに残す。認証は既存の `writeFileContent` と同じ `ScriptApp.getOAuthToken()` + `UrlFetchApp`(追加スコープ不要)。
 - キャッシュは docId ごとに 1 件(`progress_<docId>`、TTL `PROGRESS_CACHE_SEC`=6 時間)。値は `{stamp: '<最終更新ms>_<サイズ>', ep}` で、**印が一致したときだけ使い、違えば読み直す**(読み進めて先頭を削除すると最終更新が変わる)。**取得で書き込んだときは `finishRun` が `invalidateProgressCache_` で明示的に消す**。更新から `PROGRESS_FRESH_MS`(5 分)以内の判定結果はキャッシュしない(Drive 側の反映待ちで古い中身が返る窓を固定しないため)。
 - クライアントは作品ごとの問い合わせ通し番号 `epSeq` を持ち、**同じ作品への問い合わせが重なったら最後に出した方の応答だけを `readingEp` に反映する**(ページ読込時の「最新」が、一括取得後の再問い合わせより遅れて返って上書きするのを防ぐ)。
 - 分冊は古い順に見て、削除済み・見出し無しは飛ばして次へ。全て無ければ `'latest'`。
-- クライアントは `readingEp` を持ち、`PROGRESS_CHUNK`(5)件ずつ問い合わせる。
+- クライアントは `readingEp` を持つ(問い合わせ方は上の④)。
 - 既知の割り切り: ① 1 話が 2 万字超だと窓の外で「最新」と誤表示、② 読みかけの話は見出しごと消えているので表示は +1 側に寄る、③ 読書によるドキュメント削除は `updatedAt` を動かさないので、**読み進めた結果の反映はページ再読込時**。
 
 ### サイズと次話の問い合わせ順序(dedup)
 
-`render()` は `refreshChangedWorks` → `maybeFetchProgress` → `maybeFetchSizes` の順で呼ぶ。`maybeFetchSizes` は次話問い合わせが進行中(`pendingEpIds`)の作品を除外し、`fetchProgressChunk` が `sizes` を `docSizes` に反映した上で不足分だけ `webGetDocSizes` に回す(同じファイルを二重に開かない)。**ただし `refreshChangedWorks` の `fetchSizes` は dedup 対象にしない**(常に全 docId を明示的に呼ぶ)。次話判定は見出しが見つかった時点で打ち切るため、今回追記された後ろの分冊が `sizes` に含まれず、サイズが更新されない不具合が再発する。
+`render()` は `refreshChangedWorks` → `maybeFetchProgress` → `maybeFetchSizes` の順で呼ぶ。`maybeFetchSizes` は次話問い合わせが進行中(`pendingEpIds`)の作品を除外し、`fetchProgressChunk` が `sizes` を `docSizes` に反映した上で不足分だけ `webGetDocSizes` に回す(同じファイルを二重に開かない)。**ただし `refreshChangedWorks` の `fetchSizes` は dedup 対象にしない**(常に全 docId を明示的に呼ぶ)。次話判定は見出しが見つかった時点で打ち切るため、今回追記された後ろの分冊が `sizes` に含まれず、サイズが更新されない不具合が再発する(フォルダの一覧で全冊のサイズが返るようになった後も、一覧が取れなかったとき・フォルダの外の冊は同じなので維持する)。`fetchProgressChunk` は `pending` で問い合わせ直す作品を `webGetDocSizes` への不足分から除く(問い合わせ直しの応答でサイズが返るため)。
 
 ## データモデル(Script Properties)
 

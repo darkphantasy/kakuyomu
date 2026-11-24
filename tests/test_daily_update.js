@@ -59,6 +59,10 @@ const off = g('webToggleDailyUpdate()');
 check('OFF にした旨', [off.ok, off.message.indexOf('OFF') >= 0], [true, true]);
 check('両方とも消える・表示も OFF', [count('dailyUpdateWake'), count('dailyUpdateRun'), g('webGetState()').daily.enabled], [0, 0, false]);
 
+section('webGetState は索引シートへのリンクも同梱する（画面を開いたときの別の問い合わせを省くため）');
+props.INDEX_SHEET_ID = 'SHEET1';
+check('links.indexUrl', g('webGetState()').links, { indexUrl: 'https://docs.google.com/spreadsheets/d/SHEET1' });
+
 section('Web UI: ON/OFF・時刻・前回の開始時刻を出す');
 const ui = createUiSandbox({ runner: inertRunner() });
 const base = { works: [], running: { active: false }, queueCount: 0, shortFilename: true, lastBatchResult: '' };
