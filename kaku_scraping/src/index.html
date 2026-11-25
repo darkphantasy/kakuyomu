@@ -112,9 +112,14 @@
         text-decoration: none; box-shadow: 0 1px 4px rgba(0, 0, 0, .18); user-select: none;
       }
       a.scroll-btn:hover { background: #eef1f5; }
+      /* スマホ幅ではドキュメント列（.hide-sp）を隠す代わりに、作品名の下に分冊リンクを出す（.show-sp。2026-11、
+         iOS で開くとドキュメントへのリンクが見えなかった） */
+      .show-sp { display: none; }
+      .docs-sp { margin-top: 4px; line-height: 1.8; }
       @media (max-width: 640px) {
         .grid3 { grid-template-columns: 1fr; }
         .hide-sp { display: none; }
+        .show-sp { display: block; }
       }
     </style>
   </head>
@@ -935,6 +940,10 @@
           tdTitle.appendChild(tag);
           tdTitle.appendChild(d1);
           tdTitle.appendChild(d2);
+          var docsSp = document.createElement('div');  // スマホ幅用（ドキュメント列が隠れるので作品名の下に出す）
+          docsSp.className = 'docs docs-sp show-sp';
+          appendDocLinks(docsSp, w);
+          if (docsSp.firstChild) tdTitle.appendChild(docsSp);
 
           var tdTotal = document.createElement('td');
           tdTotal.className = 'num';
@@ -950,21 +959,7 @@
 
           var tdDocs = document.createElement('td');
           tdDocs.className = 'docs hide-sp';
-          w.docIds.forEach(function (id, i) {
-            // サイズ0（削除済み・アクセス不可）が判明しているものはリンクごと出さない。
-            // まだサイズ未取得の間はサイズ表記なしでリンクだけ出す。
-            var isKnown = Object.prototype.hasOwnProperty.call(docSizes, id);
-            var bytes = docSizes[id];
-            if (isKnown && bytes === 0) return;
-
-            var a = document.createElement('a');
-            a.href = 'https://docs.google.com/document/d/' + id;
-            a.target = '_blank';
-            a.textContent = (i + 1) + '冊目' + (isKnown ? ('（' + Math.round(bytes / 1024) + ' KB）') : '');
-            // リンクの間に空白を挟む（折り返し位置。無いと Firefox は分冊リンク全体を 1 行として扱い、列が広がる）
-            if (tdDocs.firstChild) tdDocs.appendChild(document.createTextNode(' '));
-            tdDocs.appendChild(a);
-          });
+          appendDocLinks(tdDocs, w);
 
           var tdAct = document.createElement('td');
           var wrap = document.createElement('div');
@@ -996,6 +991,25 @@
           tr.appendChild(tdDocs);
           tr.appendChild(tdAct);
           tb.appendChild(tr);
+        });
+      }
+
+      // 作品の分冊リンク（N冊目（KB））を box に足す。広い画面のドキュメント列と、スマホ幅の作品名の下で共用。
+      function appendDocLinks(box, w) {
+        w.docIds.forEach(function (id, i) {
+          // サイズ0（削除済み・アクセス不可）が判明しているものはリンクごと出さない。
+          // まだサイズ未取得の間はサイズ表記なしでリンクだけ出す。
+          var isKnown = Object.prototype.hasOwnProperty.call(docSizes, id);
+          var bytes = docSizes[id];
+          if (isKnown && bytes === 0) return;
+
+          var a = document.createElement('a');
+          a.href = 'https://docs.google.com/document/d/' + id;
+          a.target = '_blank';
+          a.textContent = (i + 1) + '冊目' + (isKnown ? ('（' + Math.round(bytes / 1024) + ' KB）') : '');
+          // リンクの間に空白を挟む（折り返し位置。無いと Firefox は分冊リンク全体を 1 行として扱い、列が広がる）
+          if (box.firstChild) box.appendChild(document.createTextNode(' '));
+          box.appendChild(a);
         });
       }
 

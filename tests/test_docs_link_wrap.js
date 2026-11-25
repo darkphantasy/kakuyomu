@@ -44,12 +44,26 @@ check('リンクと空白が交互に並ぶ（先頭・末尾に余計な空白�
   ['リンク', '空白', 'リンク', '空白', 'リンク', '空白', 'リンク', '空白', 'リンク']);
 check('空白は普通の半角スペース', tdDocs.children.filter(c => c.nodeType === 3).every(c => c.text === ' '), true);
 
+section('スマホ幅用: 作品名の下にも同じ分冊リンクを出す（ドキュメント列は隠れるため。2026-11、iOS で見えなかった）');
+const docsSp = rows[0].children[0].children.find(c => c.className === 'docs docs-sp show-sp');
+check('作品名のセルにスマホ用のリンク欄がある', !!docsSp, true);
+check('リンクと空白が交互・リンク先と文言は列と同じ',
+  docsSp.children.map(c => (c.nodeType === 3 ? ' ' : c.href + '|' + c.textContent)),
+  tdDocs.children.map(c => (c.nodeType === 3 ? ' ' : c.href + '|' + c.textContent)));
+ui.g('docSizes = ' + JSON.stringify({ d1: 0, d2: 0, d3: 0, d4: 0, d5: 0 }));
+rows.length = 0;
+ui.g('renderTable()');
+check('リンクが 1 つも無い（全冊削除済み）ならスマホ用の欄は付けない',
+  rows[0].children[0].children.some(c => /docs-sp/.test(c.className)), false);
+
 section('作品名の列に下限幅のためのクラスを付ける');
 check('作品名のセルは title-cell', rows[0].children[0].className, 'title-cell');
 
 section('CSS');
 check('下限幅は広い画面だけ（スマホ幅では横にはみ出すため付けない）',
   /@media \(min-width: 641px\) \{ td\.title-cell \{ min-width: [\d.]+em; \} \}/.test(html), true);
+check('スマホ幅では .show-sp を出し .hide-sp を隠す（広い画面では .show-sp は隠す）',
+  /\.show-sp \{ display: none; \}/.test(html) && /@media \(max-width: 640px\) \{(?:\s*[^{}]+\{[^}]*\})*?\s*\.hide-sp \{ display: none; \}\s*\.show-sp \{ display: block; \}/.test(html), true);
 check('サイト表示（カクヨム/なろう）は途中で折り返さない', /\.site-tag \{[^}]*white-space: nowrap/.test(html), true);
 
 finish();
